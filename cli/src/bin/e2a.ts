@@ -111,6 +111,9 @@ Usage:
         --agent <email>            Sending inbox (or config agent_email / E2A_AGENT_EMAIL)
         --json                     Print the full send result as JSON
   e2a reply <message-id> [options]  Reply in-thread (same body options as send)
+        --quote-history            Experimental (may change or be removed): the server appends the
+                                   original message beneath the reply body, mail-client style
+                                   ("On <date>, <sender> wrote:" + '>'-quoted text / blockquote HTML)
   e2a messages list [options]       List messages, oldest first
         --direction <d>            inbound|outbound|all
         --since <ISO>              Messages created AT or after this timestamp
@@ -617,7 +620,7 @@ async function main() {
       break;
     case "reply":
       checkFlags(args, [
-        "--body", "--body-file", "--html-file", "--attach", "--reply-to", "--send-at", "--agent", "--idempotency-key", "--json",
+        "--body", "--body-file", "--html-file", "--attach", "--reply-to", "--send-at", "--quote-history", "--agent", "--idempotency-key", "--json",
       ]);
       await reply(getPositionals(args, 1, "usage: e2a reply <message-id> [options]")[0], {
         attach: getFlagsChecked(args, "--attach"),
@@ -626,6 +629,7 @@ async function main() {
         htmlFile: getFlagChecked(args, "--html-file"),
         replyTo: getFlagChecked(args, "--reply-to"),
         sendAt: getFlagChecked(args, "--send-at"),
+        quoteHistory: hasFlag(args, "--quote-history"),
         agent: getFlagChecked(args, "--agent"),
         idempotencyKey: getFlagChecked(args, "--idempotency-key"),
         json: hasFlag(args, "--json"),
