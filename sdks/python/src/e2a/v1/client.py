@@ -16,6 +16,7 @@ from typing import Any, Awaitable, Callable, List, Literal, Mapping, Optional, P
 
 from pydantic import ValidationError
 
+from ._dot_segment_guard import reject_dot_segment_path_params
 from ._retry import RetryConfig, request_with_retry
 from .errors import E2AError, E2AServerError, E2AValidationError
 from .generated.api.account_api import AccountApi
@@ -211,7 +212,12 @@ def _coerce(model_cls: Type[T], body: Optional[Body]) -> T:
 
 
 class _TypedApiClient(ApiClient):
-    """Map malformed successful responses before the retry boundary sees them."""
+    """Map malformed successful responses before the retry boundary sees them,
+    and refuse a dot-segment path parameter before it can retarget a request."""
+
+    def param_serialize(self, method: Any, resource_path: Any, path_params: Any = None, **kwargs: Any) -> Any:
+        reject_dot_segment_path_params(path_params)
+        return super().param_serialize(method, resource_path, path_params=path_params, **kwargs)
 
     def response_deserialize(self, response_data: Any, response_types_map: Any = None) -> Any:
         try:

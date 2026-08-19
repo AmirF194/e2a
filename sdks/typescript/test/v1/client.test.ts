@@ -283,6 +283,23 @@ describe("E2AClient", () => {
     expect(deleted.deleted).toBe(true);
   });
 
+  // See dot-segment-guard.test.ts for the guard's own isolated coverage.
+  it("refuses a dot-segment id before it can retarget onto a parent DELETE endpoint", async () => {
+    globalThis.fetch = mockFetch(200, { deleted: true });
+
+    await expect(client.account.suppressions.delete("..")).rejects.toMatchObject({
+      code: "invalid_request_path",
+    });
+    await expect(client.account.apiKeys.delete("..")).rejects.toMatchObject({
+      code: "invalid_request_path",
+    });
+    await expect(
+      client.agents.deleteSuppression("sender@example.com", ".."),
+    ).rejects.toMatchObject({ code: "invalid_request_path" });
+
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
   // ── Messages: idempotency + pagination ──────────────────────────
 
   it("messages.getLifecycle forwards cursor/limit and parses canonical transitions", async () => {

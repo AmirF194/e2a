@@ -103,6 +103,7 @@ import { AutoPager } from "./pagination.js";
 import { WSStream } from "./ws.js";
 import type { WebhookEvent, EmailReceivedData } from "./webhook-signature.js";
 import { InboundResource } from "./inbound.js";
+import { guardDotSegments } from "./dot-segment-guard.js";
 
 export interface E2AClientOptions {
   /** Account (`e2a_acct_`) or agent (`e2a_agt_`) key, or an OAuth access token.
@@ -233,7 +234,7 @@ export class E2AClient {
       timeoutMs: opts.timeoutMs ?? 30000,
     });
     const config = createConfiguration({
-      baseServer: new ServerConfiguration(baseUrl, {}),
+      baseServer: guardDotSegments(new ServerConfiguration(baseUrl, {})),
       httpApi,
       authMethods: { bearer: { tokenProvider: { getToken: () => apiKey } } },
     });
