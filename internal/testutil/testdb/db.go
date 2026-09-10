@@ -45,14 +45,14 @@ func baseTestDBURL() string {
 }
 
 // TestDBURL returns the database URL tests should use. Inside a `go test`
-// binary it derives a PER-PACKAGE database name (<base>_pkg_<package>) so
-// packages can run in parallel: the harness truncates tables between tests,
-// which made one shared database the documented cross-package flake source
-// and forced -p 1 on every DB-backed run. The suffix comes from the test
-// binary's name (os.Args[0] = <package>.test — unique per package in this
-// repo), so every URL consumer in one test binary — TestDB, hand-built
-// pools, the in-process contract server — lands on the same database.
-// Non-test binaries (cmd/e2a-contract-server) and E2A_TEST_DB_SHARED=1 get
+// binary it derives a PER-WORKSPACE, PER-BINARY database name
+// (<base>_ws<workspace>_pkg_<binary>) so packages can run in parallel and
+// separate checkouts cannot truncate each other's rows: the harness truncates
+// tables between tests, which made shared databases the documented
+// cross-package and cross-worktree flake source. The suffix comes from the
+// binary's name (os.Args[0] = <package>.test for go test), so every URL
+// consumer in one process — TestDB, hand-built pools, and the in-process
+// contract server — lands on the same database. E2A_TEST_DB_SHARED=1 gets
 // the base URL verbatim. Missing databases self-provision on first open
 // (see OpenPreparedTestDB). Concurrent sessions, agents, and worktrees are
 // isolated by the per-workspace component below, so handing each runner its
@@ -99,8 +99,8 @@ func TestDBURL() string {
 const maxPostgresIdentifier = 63
 
 // derivedDBSuffix derives the database-name suffix beneath the configured base:
-// a per-WORKSPACE component plus a per-PACKAGE component, or "" when the process
-// is not a test binary or sharing is forced.
+// a per-WORKSPACE component plus a per-PACKAGE component, or "" when sharing
+// is forced.
 //
 // Two dimensions, because per-package alone was not enough. It stops packages in
 // ONE run from truncating each other, but every checkout computed the same names,
@@ -110,6 +110,13 @@ const maxPostgresIdentifier = 63
 // callers who do not know about each other. Deriving from the module root path
 // makes the isolation structural: two checkouts cannot collide even when nobody
 // configures anything.
+//
+// Derived for every binary, not only `go test` ones: a plain binary built from
+// this module (cmd/e2a-contract-server is the one that calls into the test
+// harness) previously fell through to the base URL verbatim, so two contract
+// server processes on one machine shared and truncated each other's database.
+// os.Args[0] for a non-test binary is just its own name (no ".test" suffix),
+// which still yields a distinct, stable per-binary component.
 //
 // Name length: <base>_ws<8>_pkg_<package> runs ~40 chars for this repo's longest
 // package names, well inside Postgres's 63-byte identifier limit. A much longer
@@ -121,9 +128,6 @@ func derivedDBSuffix() string {
 		return ""
 	}
 	bin := filepath.Base(os.Args[0])
-	if !strings.HasSuffix(bin, ".test") {
-		return ""
-	}
 	name := strings.ToLower(strings.TrimSuffix(bin, ".test"))
 	sanitized := make([]rune, 0, len(name))
 	for _, r := range name {
