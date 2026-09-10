@@ -470,6 +470,84 @@ func TestHTTP_Consent_Allow_CreateNew(t *testing.T) {
 	}
 }
 
+// TestHTTP_Consent_Allow_CreateNew_AtAgentCap: the auto-create path must
+// enforce the same max_agents cap the REST create path does; it previously
+// did not check at all.
+//
+// Cap is exercised with a real pre-existing agent at MaxAgents=1 rather than
+// MaxAgents=0: the atomic CreateAgentWithLimitTx path this handler now
+// shares with the REST create path (#942) treats maxAgents<=0 as unlimited
+// (see identity.Store.CreateAgentWithLimit), the same convention
+// httpapi.Deps.GetLimits documents, so a MaxAgents=0 fixture would no
+// longer exercise the cap at all.
+func TestHTTP_Consent_Allow_CreateNew_AtAgentCap(t *testing.T) {
+	f := newConsentFixture(t)
+	ctx := context.Background()
+
+	if _, err := identity.NewStore(f.pool).CreateAgent(ctx,
+		"existing@agents.e2a.dev", "agents.e2a.dev", "existing", "", "", f.userID); err != nil {
+		t.Fatalf("seed existing agent: %v", err)
+	}
+
+	if err := limits.NewStore(f.pool).Upsert(ctx, f.userID, limits.Limits{
+		PlanCode: "test", MaxAgents: 1, MaxDomains: 100000,
+		MaxMessagesMonth: 100000, MaxStorageBytes: 1 << 40,
+	}); err != nil {
+		t.Fatalf("Upsert limits: %v", err)
+	}
+
+	_, challenge := newPKCE(t)
+	form := authorizeParams(challenge, f.clientID, "s1s1s1s1s1s1s1s1")
+	form.Set("action", "allow")
+	form.Set("agent_choice", "create_new")
+	form.Set("new_agent_slug", "capconsentbot")
+
+	resp := f.consentPOST(t, form)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusPaymentRequired {
+		t.Fatalf("status = %d, want 402 Payment Required", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Content-Type"); !strings.HasPrefix(got, "application/json") {
+		t.Fatalf("Content-Type = %q, want application/json", got)
+	}
+	var body struct {
+		Error   string `json:"error"`
+		Details struct {
+			Resource string `json:"resource"`
+			Limit    int    `json:"limit"`
+			Current  int    `json:"current"`
+		} `json:"details"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode 402 body: %v", err)
+	}
+	if body.Error != "limit_exceeded" {
+		t.Fatalf("error = %q, want limit_exceeded", body.Error)
+	}
+	if body.Details.Resource != "agents" || body.Details.Limit != 1 || body.Details.Current != 1 {
+		t.Fatalf("details = %+v, want agents limit=1 current=1", body.Details)
+	}
+
+	var agentCount int
+	if err := f.pool.QueryRow(ctx,
+		`SELECT count(*) FROM agent_identities WHERE id = $1`,
+		"capconsentbot@agents.e2a.dev").Scan(&agentCount); err != nil {
+		t.Fatal(err)
+	}
+	if agentCount != 0 {
+		t.Errorf("agent must not be created over cap, got %d rows", agentCount)
+	}
+
+	var codeCount int
+	if err := f.pool.QueryRow(ctx,
+		`SELECT count(*) FROM oauth_auth_codes WHERE user_id = $1`, f.userID).Scan(&codeCount); err != nil {
+		t.Fatal(err)
+	}
+	if codeCount != 0 {
+		t.Errorf("no auth code should be issued when the agent cap blocks creation, got %d", codeCount)
+	}
+}
+
 // TestHTTP_Consent_Allow_Existing — user picks an agent they already
 // own. No new agent created; code issued bound to the chosen email.
 func TestHTTP_Consent_Allow_Existing(t *testing.T) {
