@@ -105,6 +105,16 @@ func StartContractServer(ctx context.Context, dbURL string) (*ContractServer, er
 	}
 
 	store := identity.NewStore(pool)
+	// Mirrors production's boot-time call (cmd/e2a/main.go): the FK on
+	// agent_identities.registered_domain needs a domains row for the shared
+	// domain before any scenario can create a slug-based agent on it. The
+	// migration seed only covers the hardcoded agents.e2a.dev row (see
+	// EnsureSharedDomain's own doc comment), which no longer matches this
+	// harness's "agents.localhost" SharedDomain.
+	if err := store.EnsureSharedDomain(ctx, "agents.localhost"); err != nil {
+		pool.Close()
+		return nil, err
+	}
 	managedUnsubscribeIssuer, err := unsubscribe.NewIssuer(TestHMACSecret, "http://127.0.0.1", false, store)
 	if err != nil {
 		pool.Close()
