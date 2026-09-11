@@ -153,7 +153,7 @@ func StartContractServer(ctx context.Context, dbURL string) (*ContractServer, er
 	outboundJobs.SetEnqueuer(jobsClient)
 
 	router := mux.NewRouter()
-	api := agent.NewAPI(store, sender, smtpRelay, nil, noopUsage, "e2a.dev", "test.e2a.dev", "agents.e2a.dev", "", false)
+	api := agent.NewAPI(store, sender, smtpRelay, nil, noopUsage, "e2a.dev", "test.e2a.dev", "agents.localhost", "", false)
 	api.SetProviderSubmitter(providerSubmitter, sendingGate)
 	api.SetIdempotencyStore(idempotencyStore)
 	api.SetEnforcer(enforcer)
@@ -173,7 +173,7 @@ func StartContractServer(ctx context.Context, dbURL string) (*ContractServer, er
 	v1 := apiserver.New(apiserver.Params{
 		API: api, Store: store, Enforcer: enforcer, UsageStore: usageStore,
 		SubscriberStore: subscriberStore, Idempotency: idempotencyStore, Pool: pool,
-		SMTPDomain: "test.e2a.dev", SharedDomain: "agents.e2a.dev",
+		SMTPDomain: "test.e2a.dev", SharedDomain: "agents.localhost",
 		PublicURL: "http://127.0.0.1", Production: false,
 		EventsEnabled:            true,
 		ManagedUnsubscribeIssuer: managedUnsubscribeIssuer,
@@ -305,7 +305,7 @@ func StartContractServer(ctx context.Context, dbURL string) (*ContractServer, er
 		return nil, err
 	}
 	for i := 1; i <= 3; i++ {
-		agentEmail := fmt.Sprintf("overcap-bot-%d@agents.e2a.dev", i)
+		agentEmail := fmt.Sprintf("overcap-bot-%d@agents.localhost", i)
 		if _, err := store.CreateAgentWithLimit(ctx, agentEmail, "overcap-1.test.dev", "OverCap Bot", overCapUser.ID, 0); err != nil {
 			_ = smtpServer.Close()
 			_ = httpServer.Shutdown(context.Background())
