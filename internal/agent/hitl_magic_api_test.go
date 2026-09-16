@@ -278,6 +278,34 @@ func TestMagicApproveGETRendersConfirmForm(t *testing.T) {
 	}
 }
 
+// Pins the confirm page's escaping of caller-controlled fields: a subject
+// or body containing HTML metacharacters must render escaped, never as a
+// literal tag.
+func TestMagicApproveGETEscapesSubjectAndBody(t *testing.T) {
+	server, store, signer, _ := setupMagicLinkAPI(t)
+	a, _ := prepareHITLAgent(t, store, "escapes-subject-body")
+	msg, err := store.CreatePendingOutboundMessage(context.Background(), a.ID,
+		[]string{"alice@example.com"}, nil, nil,
+		`<script>alert(1)</script>`, `<b>xss</b>`, "", nil,
+		"send", "", "", "", 3600)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tok, _ := signer.Sign(msg.ID, approvaltoken.ActionApprove, time.Now().Add(1*time.Hour))
+	resp, _ := http.Get(server.URL + "/v1/approve?t=" + url.QueryEscape(tok))
+	body := readBody(t, resp)
+
+	if strings.Contains(body, "<script>") || strings.Contains(body, "<b>xss</b>") {
+		t.Fatalf("confirm page contains an unescaped tag:\n%s", body)
+	}
+	for _, needle := range []string{"&lt;script&gt;alert(1)&lt;/script&gt;", "&lt;b&gt;xss&lt;/b&gt;"} {
+		if !strings.Contains(body, needle) {
+			t.Errorf("confirm page missing escaped form %q", needle)
+		}
+	}
+}
+
 func TestMagicRejectGETRendersConfirmFormWithReasonField(t *testing.T) {
 	server, store, signer, _ := setupMagicLinkAPI(t)
 	a, _ := prepareHITLAgent(t, store, "get-reject-form")
@@ -839,6 +867,34 @@ func TestMagicLinkNoCacheAndSecurityHeaders(t *testing.T) {
 		if got := resp.Header.Get("X-Robots-Tag"); !strings.Contains(got, "noindex") {
 			t.Errorf("%s: X-Robots-Tag = %q, want containing noindex", path, got)
 		}
+		if got := resp.Header.Get("Content-Security-Policy"); !strings.Contains(got, "script-src 'none'") {
+			t.Errorf("%s: Content-Security-Policy = %q, want containing script-src 'none'", path, got)
+		}
+	}
+}
+
+// A held message can be arbitrarily large; the confirm page's body preview
+// must not turn into a response the same size as the source message.
+func TestMagicApproveGETTruncatesOversizedBodyPreview(t *testing.T) {
+	server, store, signer, _ := setupMagicLinkAPI(t)
+	a, _ := prepareHITLAgent(t, store, "oversized-preview")
+	bigBody := strings.Repeat("a", 1024*1024) // 1 MB, well past magicPreviewMaxBytes
+	msg, err := store.CreatePendingOutboundMessage(context.Background(), a.ID,
+		[]string{"alice@example.com"}, nil, nil,
+		"Held", bigBody, "", nil, "send", "", "", "", 3600)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tok, _ := signer.Sign(msg.ID, approvaltoken.ActionApprove, time.Now().Add(1*time.Hour))
+	resp, _ := http.Get(server.URL + "/v1/approve?t=" + url.QueryEscape(tok))
+	body := readBody(t, resp)
+
+	if len(body) >= len(bigBody) {
+		t.Fatalf("confirm page body is %d bytes, want well under the %d-byte source", len(body), len(bigBody))
+	}
+	if !strings.Contains(body, "truncated; view full in the dashboard") {
+		t.Errorf("confirm page missing the truncation notice")
 	}
 }
 

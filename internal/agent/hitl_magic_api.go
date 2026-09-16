@@ -777,6 +777,11 @@ func setMagicHeaders(w http.ResponseWriter, status int) {
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	// Discourage indexing if a link ever leaks publicly.
 	w.Header().Set("X-Robots-Tag", "noindex, nofollow")
+	// Belt-and-suspenders against script injection: these pages have no
+	// legitimate scripts, so block them outright rather than relying only
+	// on html.EscapeString at every render call.
+	w.Header().Set("Content-Security-Policy",
+		"default-src 'self'; img-src 'self' data:; style-src 'unsafe-inline'; script-src 'none'; base-uri 'self'; form-action 'self'")
 	w.WriteHeader(status)
 }
 
@@ -859,6 +864,25 @@ func bannerEyebrowFor(status int) string {
 	}
 }
 
+// magicPreviewMaxBytes bounds the confirm page's rendered body preview.
+// Without it, msg.BodyText is emitted unbounded: a multi-megabyte held
+// message turns every confirm-page load into a multi-megabyte response.
+const magicPreviewMaxBytes = 16 * 1024
+
+// truncatePreview cuts s to at most magicPreviewMaxBytes bytes at a UTF-8
+// rune boundary (never mid-sequence) and appends a truncation notice when
+// it cuts.
+func truncatePreview(s string) string {
+	if len(s) <= magicPreviewMaxBytes {
+		return s
+	}
+	cut := magicPreviewMaxBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "\n\n... truncated; view full in the dashboard."
+}
+
 // writeConfirmPage renders the token-gated preview + POST form. This is
 // where the body preview lives — the reviewer has already opened the
 // link in their browser, so showing held content here is acceptable.
@@ -889,6 +913,7 @@ func writeConfirmPage(w http.ResponseWriter, status int, action, token string, m
 	if bodyPreview == "" && msg.BodyHTML != "" {
 		bodyPreview = "(HTML only; view full message in the dashboard)"
 	}
+	bodyPreview = truncatePreview(bodyPreview)
 
 	toList := strings.Join(msg.ToRecipients, ", ")
 	ccList := strings.Join(msg.CC, ", ")
