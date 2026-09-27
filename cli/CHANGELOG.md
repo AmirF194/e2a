@@ -11,6 +11,13 @@ live key per device rather than growing the list forever. A hostname lookup
 failure just omits the parameter and falls back to the previous behavior for
 that login, so it can never fail the command.
 
+**Changed:** `e2a sending-access status` prints an `available unlocks: ...`
+line from the deployment's `sending_access.available_unlocks`, and both it and
+`e2a whoami` offer only the recovery routes the deployment honors. A paid plan
+counts as a grant only where `paid_entitlement` is listed (a server that omits
+the field is read as accepting all three, as before). `e2a sending-access
+request` now says the decision is emailed to the account owner.
+
 **Added:** `e2a account delete [--permanent] [--yes] [--json]`. By default the
 account is moved to the trash — every API key, OAuth grant, and dashboard
 session is revoked and sending stops immediately, but the account is
