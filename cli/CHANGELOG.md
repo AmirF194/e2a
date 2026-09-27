@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+**Fixed:** `e2a login` no longer accumulates an indistinguishable new API key
+on every re-authentication. The browser login URL now includes the machine's
+hostname as `device_name`; the server uses it to replace that device's own
+prior "CLI login on <hostname>" key instead of minting another one, so
+re-running `e2a login` from the same machine (or a config wipe) leaves one
+live key per device rather than growing the list forever. A hostname lookup
+failure just omits the parameter and falls back to the previous behavior for
+that login, so it can never fail the command.
+
 **Added:** `e2a account delete [--permanent] [--yes] [--json]`. By default the
 account is moved to the trash — every API key, OAuth grant, and dashboard
 session is revoked and sending stops immediately, but the account is
