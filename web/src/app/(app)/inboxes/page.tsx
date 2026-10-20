@@ -8,6 +8,9 @@ import { AgentPromptCard, AGENT_PROMPTS } from "../../components/AgentPromptCard
 import { listDomains } from "../../components/onboarding/api";
 import { canReceive } from "../../components/onboarding/state";
 import { useAgents } from "../../components/hooks/useAgents";
+import { useSendingAccess } from "../../components/hooks/useSendingAccess";
+import { useAccountReadOnly } from "../../components/hooks/useAccountReadOnly";
+import { SendingAccessNotice } from "../../components/SendingAccessNotice";
 import { domainsKey } from "../../../lib/swrKeys";
 import type { DashboardAgent } from "../../components/types";
 import type { DomainInfo } from "../../components/onboarding/types";
@@ -87,11 +90,13 @@ function FilterBar({
 }
 
 export default function DashboardPage() {
+  const readOnly = useAccountReadOnly();
   const { user } = useAuth();
   // Both feeds are read through SWR so an agent edit on the Settings
   // page (which invalidates `agentsKey`) flows back into this view
   // without a manual refetch.
   const { agents, error: agentsError, isLoading: agentsLoading } = useAgents();
+  const { status: sendingAccessStatus } = useSendingAccess();
   const { data: domains = [] } = useSWR(domainsKey, () =>
     listDomains().catch(() => [] as DomainInfo[]),
   );
@@ -168,7 +173,8 @@ export default function DashboardPage() {
         </>
       }
       actions={
-        agents.length > 0 ? (
+        // A read-only account cannot create inboxes; the banner explains why.
+        agents.length > 0 && !readOnly ? (
           <Link
             href="/get-started"
             className="inline-flex items-center gap-1.5 text-[13px] font-medium px-4 py-2"
@@ -196,6 +202,8 @@ export default function DashboardPage() {
           {error}
         </div>
       )}
+
+      <SendingAccessNotice status={sendingAccessStatus} />
 
       <div className="mb-10">
         <AgentPromptCard {...AGENT_PROMPTS.inboxes} />

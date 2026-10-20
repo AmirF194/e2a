@@ -22,6 +22,14 @@ var errorCodeCatalog = []errorCodeContract{
 	{Code: "forbidden", Status: "403", Family: "auth"},
 	{Code: "blocked_by_policy", Status: "403", Family: "auth"},
 	{Code: "sending_paused", Status: "403", Family: "auth"},
+	{Code: "external_sending_not_enabled", Status: "403", Family: "auth", DetailsSchema: "ExternalSendingNotEnabledDetails"},
+	// An identity held by a live identity tombstone (a recently deleted or
+	// abuse-closed account) cannot register or be restored.
+	{Code: "registration_refused", Status: "403", Family: "auth"},
+	// The account is read-only: its sending is paused pending an abuse
+	// review, so every write is refused (reads and the account trash keep
+	// working) until an operator resumes it.
+	{Code: "account_read_only", Status: "403", Family: "auth"},
 	{Code: "invalid_request", Status: "400 / 422", Family: "validation", DetailsSchema: "ValidationErrorDetails"},
 	{Code: "invalid_cursor", Status: "400", Family: "validation"},
 	{Code: "invalid_filter", Status: "400", Family: "validation"},
@@ -62,6 +70,9 @@ var errorCodeCatalog = []errorCodeContract{
 	{Code: "not_in_trash", Status: "409", Family: "state"},
 	{Code: "purge_in_progress", Status: "409", Family: "state"},
 	{Code: "send_in_progress", Status: "409", Family: "state"},
+	// Permanent erasure (account or agent) is held while the account's
+	// sending is paused; the trash path stays available.
+	{Code: "erase_held", Status: "409", Family: "state"},
 	{Code: "webhook_disabled", Status: "409", Family: "state"},
 	{Code: "webhook_cooldown", Status: "409", Family: "state"},
 	{Code: "domain_not_registered", Status: "400", Family: "state"},

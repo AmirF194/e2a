@@ -59,9 +59,9 @@ is explicitly enumerated in `docs/api.md` → "Stability: GA and beta surface"
 | Design system | `design-system/` | React + tsup + Storybook | `@e2a/ui` ("Loft", consumed via `file:` dep) |
 | Agent plugins | `plugins/e2a/`, `plugins/e2a-labs/` | Markdown skills + manifests | Core: Claude / Codex / Cursor; Labs: Claude / Codex |
 
-Toolchain versions: `go.mod` declares Go 1.25; CI and the Dockerfiles build
-with Go 1.26. Node: engines `>=18`, CI runs on 22. Python: `requires-python
->=3.9`, CI runs on 3.12.
+Toolchain versions: `go.mod` declares Go 1.26; CI builds with Go 1.26; the
+Dockerfiles build with Go 1.27. Node: engines `>=18`, CI runs on 22. Python:
+`requires-python >=3.9`, CI runs on 3.12.
 
 ## Repository layout
 
@@ -249,7 +249,10 @@ Key packages, grouped (name — a few words each):
   (List-Unsubscribe); `usage`/`limits` usage metering + plan/account
   entitlements; `sendramp` per-domain recipient-volume ramping; `sendrate`
   per-agent fire-time submission rate limiting (durable sliding window
-  enforced in the send worker immediately before provider submission).
+  enforced in the send worker immediately before provider submission);
+  `sendingpolicy` authoritative sending-protection runtime policy — the sole
+  provider-authorization gate (single-use, bound to one durable attempt),
+  ramp/budget composition, and operator activation.
 - Auth: `auth` API key authentication; `oauth` fosite-based MCP OAuth
   server; Google OAuth + optional generic OIDC login.
 - Misc/infra: `ratelimit`; `telemetry` (metrics interface); `logredact`
@@ -310,7 +313,8 @@ manually on every API change even though the template won't remind you.
   (`cli/src/exit.ts`) are a frozen contract** — 0 ok, 1 transient, 2 usage,
   3 held-for-review, 4 auth, 5 permanent request error, 6 timeout,
   7 send-outcome, 8 warn (`doctor` warnings only), 9 config (`doctor` found a
-  definite configuration failure). Add new codes, never renumber.
+  definite configuration failure), 10 read-only (`account_read_only`: the
+  account is frozen for an abuse review). Add new codes, never renumber.
 - **MCP server** (`mcp/`): inbox tools over the REST API; hosted HTTP
   transport (image `ghcr.io/tokencanopy/e2a-mcp-http`). **npm publishing is
   retired** (`@e2a/mcp-server` frozen at 0.5.0) — do not configure a trusted

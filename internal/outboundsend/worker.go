@@ -140,6 +140,12 @@ func (c HoldClass) expiryReason() messagelifecycle.ReasonCode {
 // than queue mail that can never leave.
 var ErrSendingPaused = errors.New("outboundsend: account sending is paused")
 
+// ErrExternalSendingNotEnabled is returned by the enqueue entry points when
+// the account may not send to the message's recipients through its sending
+// identity (external sending access). Nothing is queued; the acceptance
+// surface answers 403 external_sending_not_enabled.
+var ErrExternalSendingNotEnabled = errors.New("outboundsend: external sending is not enabled for this account")
+
 // OutboundSendArgs drives one outbound send. Args carry the message id and the
 // durable operation reference the accept transaction prepared; the worker
 // re-reads the messages row (the source of truth) each attempt. A job enqueued
@@ -310,6 +316,8 @@ type Store interface {
 	// RecordHold persists the message's finite-hold class and anchor. Terminal
 	// writes clear the pair.
 	RecordHold(ctx context.Context, messageID string, class HoldClass, anchor time.Time) error
+	// RecordHoldDetail exposes a current hold diagnostic on the queued message.
+	RecordHoldDetail(ctx context.Context, messageID string, jobID int64, detail string) error
 	// MarkSent records the provider outcome monotonically from a pre-terminal
 	// state, including when trash won after ClaimSend.
 	MarkSent(ctx context.Context, messageID string, jobID int64, attempt int, occurredAt time.Time, providerMessageID, sentAs string) error
@@ -702,6 +710,9 @@ func (w *SendWorker) operationFor(ctx context.Context, job *river.Job[OutboundSe
 	if decision == sendingpolicy.AcceptanceSendingPaused {
 		return sendingpolicy.OperationRef{}, w.hold(ctx, job, j, sendingpolicy.AttemptRef{}, sendingpolicy.Decision{Reason: sendingpolicy.ReasonAccountPaused}, observedAt)
 	}
+	if decision == sendingpolicy.AcceptanceExternalSendingNotEnabled {
+		return sendingpolicy.OperationRef{}, w.hold(ctx, job, j, sendingpolicy.AttemptRef{}, sendingpolicy.Decision{Reason: sendingpolicy.ReasonExternalSendingNotEnabled, Terminal: true}, observedAt)
+	}
 	if ref.IsZero() {
 		// The only accepted shape with no operation is an exact self-send,
 		// which never enqueues. A queued message that resolves to nothing is
@@ -715,6 +726,9 @@ func (w *SendWorker) operationFor(ctx context.Context, job *river.Job[OutboundSe
 // waits for an operator; every other one is a finite hold with a clock.
 func (w *SendWorker) hold(ctx context.Context, job *river.Job[OutboundSendArgs], j *SendJob, attempt sendingpolicy.AttemptRef, d sendingpolicy.Decision, observedAt time.Time) error {
 	if d.Terminal {
+		if d.Reason == sendingpolicy.ReasonExternalSendingNotEnabled {
+			return w.failExternalSendingNotEnabled(ctx, job, j, attempt, observedAt)
+		}
 		return w.cancelTerminally(ctx, job, j, attempt, observedAt, "sending_policy: "+d.Reason)
 	}
 	class := HoldClassFor(d.Reason)
@@ -736,7 +750,14 @@ func (w *SendWorker) hold(ctx context.Context, job *river.Job[OutboundSendArgs],
 		}
 		return river.JobSnooze(delay)
 	}
-	return w.holdFinite(ctx, job, j, attempt, class, "sending_policy_hold: "+d.Reason, delay, observedAt)
+	detail := "sending_policy_hold: " + d.Reason
+	if d.DailyLimit != nil {
+		detail += fmt.Sprintf(" limit=%d used=%d shared_limit=%d shared_used=%d resets_at=%s", d.DailyLimit.Limit, d.DailyLimit.Used, d.DailyLimit.SharedLimit, d.DailyLimit.SharedUsed, d.DailyLimit.ResetsAt.Format(time.RFC3339))
+		if err := w.store.RecordHoldDetail(ctx, j.MessageID, job.ID, detail); err != nil {
+			return fmt.Errorf("record daily limit hold: %w", err)
+		}
+	}
+	return w.holdFinite(ctx, job, j, attempt, class, detail, delay, observedAt)
 }
 
 // holdFinite persists the hold state, expires the message when its derived
@@ -856,6 +877,20 @@ func (w *SendWorker) cancelTerminally(ctx context.Context, job *river.Job[Outbou
 		return err
 	}
 	w.cancelAttempt(ctx, attempt, "terminal")
+	return river.JobCancel(errors.New(detail))
+}
+
+// failExternalSendingNotEnabled fails a queued message the account may no
+// longer send — it was accepted before enforcement, scheduled, retried, or
+// approved from review after the rule started to bind. It is terminal with its
+// own stable lifecycle reason and email.failed, and gives both ledgers back:
+// mail must never wait silently for an approval and then leave by surprise.
+func (w *SendWorker) failExternalSendingNotEnabled(ctx context.Context, job *river.Job[OutboundSendArgs], j *SendJob, attempt sendingpolicy.AttemptRef, observedAt time.Time) error {
+	detail := "external_sending_not_enabled: this account may send only to its verified owner email and its own agent inboxes until external sending is enabled"
+	if err := w.markFailed(ctx, j.MessageID, job.ID, job.Attempt, j.submissionAnchor(), observedAt, detail, delivery.FailureSourceLocal, messagelifecycle.ReasonSubmissionExternalSendingNotEnabled, nil); err != nil {
+		return err
+	}
+	w.cancelAttempt(ctx, attempt, "external sending not enabled")
 	return river.JobCancel(errors.New(detail))
 }
 

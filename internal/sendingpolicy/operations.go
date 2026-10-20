@@ -143,18 +143,30 @@ func insertOperation(ctx context.Context, tx pgx.Tx, row operationRow, notBefore
 // created before this system existed and accounts created by a code path that
 // forgets. The row is the account's sending identity; a missing one must never
 // read as "no restrictions".
+//
+// The source-deletion check lives here too: the row is ensured only for a
+// LIVE account (users.deleted_at IS NULL). A trashed account yields
+// errAccountTrashed and nothing is written — trash never touches the control
+// row, so a pause and its class survive the trash and a restore exactly.
 func ensureAccountControl(ctx context.Context, tx pgx.Tx, userID string) (state string, tenantName string, tenantReady bool, err error) {
 	err = tx.QueryRow(ctx, `
 		INSERT INTO account_sending_controls (user_id)
-		VALUES ($1)
+		SELECT id FROM users WHERE id = $1 AND deleted_at IS NULL
 		ON CONFLICT (user_id) DO UPDATE SET user_id = EXCLUDED.user_id
 		RETURNING state, ses_tenant_name, ses_tenant_ready`, userID,
 	).Scan(&state, &tenantName, &tenantReady)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", "", false, errAccountTrashed
+	}
 	if err != nil {
 		return "", "", false, fmt.Errorf("sendingpolicy: ensure account control: %w", err)
 	}
 	return state, tenantName, tenantReady, nil
 }
+
+// errAccountTrashed is ensureAccountControl's answer for an account that is
+// absent or in the trash: it may not send.
+var errAccountTrashed = errors.New("sendingpolicy: account is deleted or in the trash")
 
 // PrepareExternalTx derives the provider operation for an accepted outbound
 // customer message, inside the same transaction that durably inserts it.
@@ -231,6 +243,9 @@ func (m *Module) PrepareExternalTx(ctx context.Context, tx pgx.Tx, messageID str
 	}
 
 	state, _, _, err := ensureAccountControl(ctx, tx, userID)
+	if errors.Is(err, errAccountTrashed) {
+		return "", OperationRef{}, ErrSourceUnavailable
+	}
 	if err != nil {
 		return "", OperationRef{}, err
 	}
@@ -250,6 +265,24 @@ func (m *Module) PrepareExternalTx(ctx context.Context, tx pgx.Tx, messageID str
 	// provider-bound mail and budgeted.
 	if method != nil && *method == "loopback" && toCount == 1 && ccCount == 0 && bccCount == 0 {
 		return AcceptanceAccept, OperationRef{}, nil
+	}
+
+	// External sending access: the whole durable envelope (To, Cc and Bcc)
+	// and the durable sender are judged against the account's current state
+	// inside the accept transaction, so a change between the API preflight
+	// and this commit cannot slip past. A refusal rolls the accept back —
+	// nothing is queued. The policy read is deliberately unlocked (see
+	// policyForRead): this transaction already holds source locks.
+	policy, err := m.policyForRead(ctx, tx)
+	if err != nil {
+		return "", OperationRef{}, err
+	}
+	verdict, err := evaluateMessageAccess(ctx, tx, policy, userID, messageID, "acceptance")
+	if err != nil {
+		return "", OperationRef{}, err
+	}
+	if verdict.Denied() {
+		return AcceptanceExternalSendingNotEnabled, OperationRef{}, nil
 	}
 
 	notBefore := time.Time{}
@@ -287,8 +320,9 @@ func sharedFromSentAs(sentAs *string) bool {
 //
 // These are attributed to and budgeted against the triggering customer, not the
 // platform, because a customer controls how much of this mail exists: every
-// held message is an approval email and every failing webhook is a health
-// warning. Their From identity is platform-owned, so they also carry the shared
+// held message is an approval email, every failing webhook is a health
+// warning, and every filed access request (at most three per 30 days) can
+// earn one decision notice. Their From identity is platform-owned, so they also carry the shared
 // reputation class and the stricter shared-domain cap that comes with it.
 func (m *Module) PrepareNotificationTx(ctx context.Context, tx pgx.Tx, ref NotificationRef) (OperationRef, error) {
 	if strings.TrimSpace(ref.id) == "" {
@@ -330,6 +364,22 @@ func (m *Module) PrepareNotificationTx(ctx context.Context, tx pgx.Tx, ref Notif
 			}
 			operationID = WebhookHealthOperationID(ref.id, ref.kind, *episode)
 		}
+	case NotificationSendingAccessDecision:
+		// The operator command decided the request in its own committed
+		// transaction; the notice is owed only for a request that is no
+		// longer pending. The request row is the source: it names the
+		// account, and its decided state is what the notice reports.
+		var state string
+		err = tx.QueryRow(ctx,
+			`SELECT user_id, state FROM external_sending_access_requests WHERE id = $1 FOR SHARE`, ref.id,
+		).Scan(&userID, &state)
+		if errors.Is(err, pgx.ErrNoRows) {
+			err = ErrSourceUnavailable
+		}
+		if err == nil && state != "approved" && state != "declined" {
+			return OperationRef{}, ErrSourceUnavailable
+		}
+		operationID = SendingAccessDecisionOperationID(ref.id)
 	default:
 		return OperationRef{}, ErrSourceUnavailable
 	}
@@ -341,6 +391,9 @@ func (m *Module) PrepareNotificationTx(ctx context.Context, tx pgx.Tx, ref Notif
 	}
 
 	if _, _, _, err := ensureAccountControl(ctx, tx, userID); err != nil {
+		if errors.Is(err, errAccountTrashed) {
+			return OperationRef{}, ErrSourceUnavailable
+		}
 		return OperationRef{}, err
 	}
 

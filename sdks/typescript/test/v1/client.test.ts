@@ -215,6 +215,64 @@ describe("E2AClient", () => {
     expect(new URL(lastCall().url).searchParams.get("permanent")).toBeNull();
   });
 
+  // ── Account ─────────────────────────────────────────────────────
+
+  it("account.delete auto-sends confirm=DELETE, omits permanent, and returns the trash receipt", async () => {
+    globalThis.fetch = mockFetch(200, {
+      deleted: true,
+      mode: "trash",
+      purge_after: "2026-10-26T00:00:00Z",
+      messages_deleted: 0,
+      usage_events_deleted: 0,
+      usage_summaries_deleted: 0,
+      agents_deleted: 3,
+      domains_deleted: 1,
+      api_keys_deleted: 2,
+      sessions_deleted: 1,
+      agent_suppressions_deleted: 0,
+      agent_unsubscribe_tokens_deleted: 0,
+      user_deleted: false,
+    });
+    const res = await client.account.delete();
+    const { url, init } = lastCall();
+    expect(init.method).toBe("DELETE");
+    expect(url).toContain("/v1/account");
+    expect(url).toContain("confirm=DELETE");
+    expect(new URL(url).searchParams.get("permanent")).toBeNull();
+    expect(res.deleted).toBe(true);
+    expect(res.mode).toBe("trash");
+    expect(res.purgeAfter).toEqual(new Date("2026-10-26T00:00:00Z"));
+    expect(res.messagesDeleted).toBe(0);
+    expect(res.userDeleted).toBe(false);
+  });
+
+  it("account.delete({ permanent: true }) sends permanent=true and returns the permanent receipt", async () => {
+    globalThis.fetch = mockFetch(200, {
+      deleted: true,
+      mode: "permanent",
+      messages_deleted: 42,
+      usage_events_deleted: 5,
+      usage_summaries_deleted: 1,
+      agents_deleted: 3,
+      domains_deleted: 1,
+      api_keys_deleted: 2,
+      sessions_deleted: 1,
+      agent_suppressions_deleted: 0,
+      agent_unsubscribe_tokens_deleted: 0,
+      user_deleted: true,
+    });
+    const res = await client.account.delete({ permanent: true });
+    const { url, init } = lastCall();
+    expect(init.method).toBe("DELETE");
+    const params = new URL(url).searchParams;
+    expect(params.get("permanent")).toBe("true");
+    // The typed call is the confirmation; the SDK supplies the raw-API guard.
+    expect(params.get("confirm")).toBe("DELETE");
+    expect(res.mode).toBe("permanent");
+    expect(res.userDeleted).toBe(true);
+    expect(res.purgeAfter).toBeUndefined();
+  });
+
   it("domains.delete forwards a stable caller idempotency key", async () => {
     globalThis.fetch = mockFetch(200, {
       deleted: true,
@@ -1229,6 +1287,103 @@ describe("E2AClient", () => {
     const supp = await client.account.suppressions.list().toArray({ limit: 10 });
     expect(supp).toHaveLength(1);
     expect(lastCall().url).toContain("/v1/account/suppressions");
+  });
+
+  it("account.get decodes daily usage and the UTC reset", async () => {
+    globalThis.fetch=mockFetch(200,{daily_limit:{limit:88,used:17,shared_limit:50,shared_used:6,clean_active_days:1,resets_at:"2026-01-02T00:00:00Z"}});
+    const account=await client.account.get();
+    expect(account.dailyLimit?.limit).toBe(88);
+    expect(account.dailyLimit?.sharedUsed).toBe(6);
+    expect(account.dailyLimit?.resetsAt.toISOString()).toBe("2026-01-02T00:00:00.000Z");
+  });
+
+  it("account.get decodes sending_access.available_unlocks (beta, additive)", async () => {
+    globalThis.fetch = mockFetch(200, {
+      plan: "free",
+      sending_access: {
+        enforcement_applies: true,
+        shared_external_approved: false,
+        paid_external_sending_entitled: true,
+        owner_recipient_verified: true,
+        available_unlocks: ["operator_approval"],
+      },
+    });
+    const account = await client.account.get();
+    expect(account.sendingAccess?.availableUnlocks).toEqual(["operator_approval"]);
+    expect(account.sendingAccess?.paidExternalSendingEntitled).toBe(true);
+
+    // A server that predates the field omits it; the object still decodes.
+    globalThis.fetch = mockFetch(200, {
+      plan: "free",
+      sending_access: {
+        enforcement_applies: true,
+        shared_external_approved: false,
+        paid_external_sending_entitled: false,
+        owner_recipient_verified: false,
+      },
+    });
+    const legacy = await client.account.get();
+    expect(legacy.sendingAccess?.enforcementApplies).toBe(true);
+    expect(legacy.sendingAccess?.availableUnlocks).toBeUndefined();
+  });
+
+  it("account.requestSendingAccess POSTs the snake_case body and decodes the camelCase view", async () => {
+    globalThis.fetch = mockFetch(201, {
+      id: "sar_1",
+      state: "pending",
+      use_case: "billing reminders to our own customers",
+      recipients: "our own customers",
+      expected_daily_volume: 500,
+      created_at: "2026-01-01T00:00:00Z",
+    });
+    const filed = await client.account.requestSendingAccess({
+      useCase: "billing reminders to our own customers",
+      recipients: "our own customers",
+      expectedDailyVolume: 500,
+    });
+    expect(filed).toMatchObject({
+      id: "sar_1",
+      state: "pending",
+      useCase: "billing reminders to our own customers",
+      recipients: "our own customers",
+      expectedDailyVolume: 500,
+    });
+    expect(filed.createdAt).toBeInstanceOf(Date);
+
+    const { url, init } = lastCall();
+    expect(init.method).toBe("POST");
+    expect(url).toContain("/v1/account/sending-access/request");
+    expect(JSON.parse(init.body as string)).toEqual({
+      use_case: "billing reminders to our own customers",
+      recipients: "our own customers",
+      expected_daily_volume: 500,
+    });
+  });
+
+  it("account.getSendingAccessRequest reads the latest request back", async () => {
+    globalThis.fetch = mockFetch(200, {
+      id: "sar_1",
+      state: "pending",
+      use_case: "billing reminders",
+      recipients: "our own customers",
+      expected_daily_volume: 500,
+      created_at: "2026-01-01T00:00:00Z",
+    });
+    const latest = await client.account.getSendingAccessRequest();
+    expect(latest.id).toBe("sar_1");
+    expect(latest.state).toBe("pending");
+    const { url, init } = lastCall();
+    expect(init.method).toBe("GET");
+    expect(url).toContain("/v1/account/sending-access/request");
+  });
+
+  it("account.getSendingAccessRequest surfaces 404 not_found as E2ANotFoundError (never filed)", async () => {
+    globalThis.fetch = mockFetch(404, {
+      error: { code: "not_found", message: "no sending access request has been filed" },
+    });
+    await expect(client.account.getSendingAccessRequest()).rejects.toBeInstanceOf(
+      E2ANotFoundError,
+    );
   });
 
   // ── connection-error path through call() ────────────────────────

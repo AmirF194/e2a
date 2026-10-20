@@ -40,6 +40,15 @@ describe("whoami command", () => {
     vi.clearAllMocks();
   });
 
+  it("shows the external daily allowance and shared subset", async () => {
+    mockAccountGet.mockResolvedValue(makeAccount({dailyLimit:{limit:88,used:17,sharedLimit:50,sharedUsed:6,cleanActiveDays:1,resetsAt:new Date("2026-01-02T00:00:00Z")}}));
+    const {whoami}=await import("../commands/whoami.js");await whoami({});
+    const output=mockStdout.mock.calls.map((c:unknown[])=>c[0]).join("");
+    expect(output).toContain("daily: 17/88 external recipients");
+    expect(output).toContain("shared identity: 6/50");
+    expect(output).toContain("2026-01-02T00:00:00.000Z");
+  });
+
   it("prints identity, scope, plan, and usage for an account key", async () => {
     mockAccountGet.mockResolvedValue(makeAccount());
     const { whoami } = await import("../commands/whoami.js");
@@ -67,8 +76,170 @@ describe("whoami command", () => {
     expect(output).toContain("agent: tether@agents.e2a.dev");
   });
 
+  it("shows a restored line when restoredAt is present", async () => {
+    mockAccountGet.mockResolvedValue(
+      makeAccount({ restoredAt: new Date("2026-09-20T00:00:00Z") }),
+    );
+    const { whoami } = await import("../commands/whoami.js");
+    await whoami({});
+
+    const output = mockStdout.mock.calls.map((c: unknown[]) => c[0]).join("");
+    expect(output).toContain("restored: 2026-09-20T00:00:00.000Z (from trash)");
+  });
+
+  it("says nothing about restoration when restoredAt is absent", async () => {
+    mockAccountGet.mockResolvedValue(makeAccount());
+    const { whoami } = await import("../commands/whoami.js");
+    await whoami({});
+
+    const output = mockStdout.mock.calls.map((c: unknown[]) => c[0]).join("");
+    expect(output).not.toContain("restored:");
+  });
+
+  it("says the account is read-only when readOnly is set", async () => {
+    mockAccountGet.mockResolvedValue(makeAccount({ readOnly: true }));
+    const { whoami } = await import("../commands/whoami.js");
+    await whoami({});
+
+    const output = mockStdout.mock.calls.map((c: unknown[]) => c[0]).join("");
+    expect(output).toContain("read-only: yes");
+    expect(output).toContain("abuse review");
+  });
+
+  it("says nothing about read-only for a writable account", async () => {
+    mockAccountGet.mockResolvedValue(makeAccount({ readOnly: false }));
+    const { whoami } = await import("../commands/whoami.js");
+    await whoami({});
+
+    const output = mockStdout.mock.calls.map((c: unknown[]) => c[0]).join("");
+    expect(output).not.toContain("read-only");
+  });
+
   it("emits raw JSON with --json", async () => {
     const account = makeAccount();
+    mockAccountGet.mockResolvedValue(account);
+    const { whoami } = await import("../commands/whoami.js");
+    await whoami({ json: true });
+
+    expect(mockStdout).toHaveBeenCalledWith(JSON.stringify(account) + "\n");
+  });
+
+  // ── sending_access (beta, additive) ──────────────────────────────
+
+  it("shows the restricted-sending line only when enforced and neither grant applies", async () => {
+    mockAccountGet.mockResolvedValue(
+      makeAccount({
+        sendingAccess: {
+          enforcementApplies: true,
+          sharedExternalApproved: false,
+          paidExternalSendingEntitled: false,
+          ownerRecipientVerified: true,
+        },
+      }),
+    );
+    const { whoami } = await import("../commands/whoami.js");
+    await whoami({});
+
+    const output = mockStdout.mock.calls.map((c: unknown[]) => c[0]).join("");
+    expect(output).toContain("External sending: restricted");
+    expect(output).toContain("e2a sending-access request");
+  });
+
+  it("says nothing new when enforcement does not apply", async () => {
+    mockAccountGet.mockResolvedValue(
+      makeAccount({
+        sendingAccess: {
+          enforcementApplies: false,
+          sharedExternalApproved: false,
+          paidExternalSendingEntitled: false,
+          ownerRecipientVerified: true,
+        },
+      }),
+    );
+    const { whoami } = await import("../commands/whoami.js");
+    await whoami({});
+
+    const output = mockStdout.mock.calls.map((c: unknown[]) => c[0]).join("");
+    expect(output).not.toContain("External sending:");
+  });
+
+  it("says nothing new when the account already has a grant (shared approval)", async () => {
+    mockAccountGet.mockResolvedValue(
+      makeAccount({
+        sendingAccess: {
+          enforcementApplies: true,
+          sharedExternalApproved: true,
+          paidExternalSendingEntitled: false,
+          ownerRecipientVerified: true,
+        },
+      }),
+    );
+    const { whoami } = await import("../commands/whoami.js");
+    await whoami({});
+
+    const output = mockStdout.mock.calls.map((c: unknown[]) => c[0]).join("");
+    expect(output).not.toContain("External sending:");
+  });
+
+  it("says nothing new when the account is paid-plan entitled", async () => {
+    mockAccountGet.mockResolvedValue(
+      makeAccount({
+        sendingAccess: {
+          enforcementApplies: true,
+          sharedExternalApproved: false,
+          paidExternalSendingEntitled: true,
+          ownerRecipientVerified: true,
+        },
+      }),
+    );
+    const { whoami } = await import("../commands/whoami.js");
+    await whoami({});
+
+    const output = mockStdout.mock.calls.map((c: unknown[]) => c[0]).join("");
+    expect(output).not.toContain("External sending:");
+  });
+
+  it("a paid plan is not a grant where available_unlocks omits paid_entitlement", async () => {
+    mockAccountGet.mockResolvedValue(
+      makeAccount({
+        sendingAccess: {
+          enforcementApplies: true,
+          sharedExternalApproved: false,
+          paidExternalSendingEntitled: true,
+          ownerRecipientVerified: true,
+          availableUnlocks: ["operator_approval"],
+        },
+      }),
+    );
+    const { whoami } = await import("../commands/whoami.js");
+    await whoami({});
+
+    const output = mockStdout.mock.calls.map((c: unknown[]) => c[0]).join("");
+    expect(output).toContain("External sending: restricted");
+    expect(output).toContain("request approval");
+    // Only routes the deployment honors are offered.
+    expect(output).not.toContain("verified domain");
+    expect(output).not.toContain("paid plan");
+  });
+
+  it("says nothing new when sending_access is omitted (older/self-host deployment)", async () => {
+    mockAccountGet.mockResolvedValue(makeAccount());
+    const { whoami } = await import("../commands/whoami.js");
+    await whoami({});
+
+    const output = mockStdout.mock.calls.map((c: unknown[]) => c[0]).join("");
+    expect(output).not.toContain("External sending:");
+  });
+
+  it("--json includes the raw sending_access object verbatim", async () => {
+    const account = makeAccount({
+      sendingAccess: {
+        enforcementApplies: true,
+        sharedExternalApproved: false,
+        paidExternalSendingEntitled: false,
+        ownerRecipientVerified: true,
+      },
+    });
     mockAccountGet.mockResolvedValue(account);
     const { whoami } = await import("../commands/whoami.js");
     await whoami({ json: true });

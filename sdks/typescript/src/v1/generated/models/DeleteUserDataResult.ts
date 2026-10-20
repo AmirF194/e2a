@@ -18,17 +18,36 @@ export class DeleteUserDataResult {
     'agentsDeleted': number;
     'apiKeysDeleted': number;
     /**
-    * Always true — the account no longer exists. A failed delete is an error envelope, never deleted:false.
+    * Always true — the account is no longer usable. A failed delete is an error envelope, never deleted:false.
     */
     'deleted': boolean;
     'domainsDeleted': number;
+    /**
+    * True when permanent=true was requested but the account emailed external recipients recently (within a deployment-configured window, 14 days by default), so it was moved to the trash instead of being erased now: mode is trash and the account is purged at purge_after. The account is already unusable; the owner can restore it by signing in before purge_after. Absent otherwise.
+    */
+    'eraseDeferred'?: boolean;
+    /**
+    * Human-readable explanation, present when erase_deferred is true. Do not parse it; branch on erase_deferred.
+    */
+    'message'?: string;
     'messagesDeleted': number;
+    /**
+    * How the account was deleted. trash: the account is inert and restorable by signing in to the dashboard until purge_after, after which it is purged; messages_deleted is 0 and the other counts describe rows trashed, revoked or unverified. permanent: the content was erased now (?permanent=true, or a deployment with account trash disabled) and the counts are the rows removed. Open set: tolerate unknown values.
+    */
+    'mode'?: string;
     'oauthAccessTokensDeleted'?: number;
     'oauthAuthCodesDeleted'?: number;
     'oauthRefreshTokensDeleted'?: number;
+    /**
+    * When the trashed account becomes eligible for permanent purge. Present only when mode is trash.
+    */
+    'purgeAfter'?: Date;
     'sessionsDeleted': number;
     'usageEventsDeleted': number;
     'usageSummariesDeleted': number;
+    /**
+    * True only when the account row itself was erased (mode permanent).
+    */
     'userDeleted': boolean;
 
     static readonly discriminator: string | undefined = undefined;
@@ -73,10 +92,28 @@ export class DeleteUserDataResult {
             "format": "int64"
         },
         {
+            "name": "eraseDeferred",
+            "baseName": "erase_deferred",
+            "type": "boolean",
+            "format": ""
+        },
+        {
+            "name": "message",
+            "baseName": "message",
+            "type": "string",
+            "format": ""
+        },
+        {
             "name": "messagesDeleted",
             "baseName": "messages_deleted",
             "type": "number",
             "format": "int64"
+        },
+        {
+            "name": "mode",
+            "baseName": "mode",
+            "type": "string",
+            "format": ""
         },
         {
             "name": "oauthAccessTokensDeleted",
@@ -95,6 +132,12 @@ export class DeleteUserDataResult {
             "baseName": "oauth_refresh_tokens_deleted",
             "type": "number",
             "format": "int64"
+        },
+        {
+            "name": "purgeAfter",
+            "baseName": "purge_after",
+            "type": "Date",
+            "format": "date-time"
         },
         {
             "name": "sessionsDeleted",

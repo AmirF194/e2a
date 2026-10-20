@@ -9,6 +9,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/tokencanopy/e2a/internal/identity"
+	"github.com/tokencanopy/e2a/internal/sendramp"
 )
 
 // AccountUserView is the authenticated principal's identity (A-1). Returned by
@@ -25,7 +26,8 @@ type AccountUserView struct {
 // credentials (where the credential *is* a single agent) — omitted for
 // account scope, which spans many agents.
 type AccountView struct {
-	User AccountUserView `json:"user"`
+	DailyLimit *sendramp.AccountDailyLimit `json:"daily_limit,omitempty" doc:"External-recipient allowance for this UTC day. Used includes pending or uncertain provider submissions. Shared-identity usage is included in total usage and also bounded by shared_limit. Internal recipients (own live agents and verified owner mailbox) do not count. Omitted when this deployment does not enable the account trust ladder."`
+	User       AccountUserView             `json:"user"`
 	// Scope is an OPEN set on this response view (evolving vocabulary), not a
 	// closed enum — see docs/api.md "Versioning & stability".
 	Scope        string          `json:"scope" doc:"Credential scope. Open set: new values may be added over time, so treat these as strings and tolerate unknown values. Known values: account, agent."`
@@ -34,6 +36,20 @@ type AccountView struct {
 	Limits       LimitsCapsView  `json:"limits"`
 	Usage        LimitsUsageView `json:"usage"`
 	UpgradeURL   string          `json:"upgrade_url"`
+	// SendingAccess is the additive external-sending-access eligibility
+	// object (booleans only). Omitted when the deployment does not wire it or
+	// its state could not be read.
+	SendingAccess *SendingAccessView `json:"sending_access,omitempty" doc:"External sending access eligibility (beta). Booleans only; describes what the account may do, not a promise that a given send passes pause, quota, content or domain checks. Omitted when the deployment does not enable external sending access, or when its state is unavailable."`
+	// Account-trash lifecycle (additive). A trashed account cannot
+	// authenticate to /v1, so deleted_at/purge_after are present only on
+	// surfaces that can see a trashed account; restored_at marks the last
+	// restore so a client can show a one-time notice.
+	DeletedAt  *time.Time `json:"deleted_at,omitempty" doc:"When the account was moved to the trash. Absent for a live account."`
+	PurgeAfter *time.Time `json:"purge_after,omitempty" doc:"When a trashed account becomes eligible for permanent purge. Absent for a live account."`
+	// ReadOnly is true while the account is read-only (sending paused for an
+	// abuse review): every write is refused with 403 account_read_only.
+	ReadOnly   *bool      `json:"read_only,omitempty" doc:"True while the account is read-only because its sending is paused pending an abuse review: every write is refused with 403 account_read_only, while reads and moving the account to the trash keep working. False otherwise. Absent when the deployment does not report it or its state is unavailable."`
+	RestoredAt *time.Time `json:"restored_at,omitempty" doc:"When the account was last restored from the trash. Absent if it never was. API keys and domain verification do not survive a trash: keys must be re-created and domains re-verified after a restore."`
 }
 
 type LimitsCapsView struct {
@@ -93,12 +109,12 @@ func (s *Server) registerAccount() {
 
 	registerOp(s.API, huma.Operation{
 		OperationID: "deleteAccount", Method: http.MethodDelete, Path: "/v1/account",
-		Summary: "Delete your account + all data (irreversible)", Tags: []string{"account"},
-		Description: "Permanently deletes the account and cascades all owned data. Requires ?confirm=DELETE. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true plus per-table cascade counts) — like every delete op, which all return 200 + a deletion object.",
+		Summary: "Delete your account (trash by default; permanent=true erases now)", Tags: []string{"account"},
+		Description: "Moves the account to the trash. Requires ?confirm=DELETE. The account becomes unusable at once: every API key, OAuth grant and dashboard session is revoked, every agent is trashed (inbound mail is refused), sending stops, and every custom domain loses its verification. Signing in to the dashboard before purge_after offers a restore — keys stay revoked and domains must be re-verified — after which the account and all its data are purged permanently (the trash window is deployment-configurable; 30 days by default). Pass permanent=true to erase the account and all its data immediately instead (refused with 409 erase_held while the account's sending is paused). An account that emailed external recipients recently (within a deployment-configured window, 14 days by default) is not erased at once even with permanent=true: it is moved to the trash like a default delete and purged at purge_after, so delivery feedback such as spam complaints that arrives after a send still reaches it; the receipt then has mode trash, erase_deferred:true, purge_after and a message, and the owner can still restore it before purge_after. On deployments that disable account trash, every deletion is permanent. Either way the account's sign-in identity may be held for a period after deletion and cannot immediately register a new account. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true, mode, and per-table counts) — like every delete op, which all return 200 + a deletion object.",
 		Security:    []map[string][]string{{"bearer": {}}},
 		Responses: map[string]*huma.Response{
 			"409": s.jsonResponse(reflect.TypeOf(ErrorEnvelope{}), "ErrorEnvelope",
-				"Conflict — code send_in_progress: an outbound provider call has a fresh lease. Retry after it finishes."),
+				"Conflict — code send_in_progress: an outbound provider call has a fresh lease. Retry after it finishes. Code erase_held: permanent=true while the account's sending is paused; delete without permanent to move it to the trash."),
 			"default": s.errorEnvelopeResponse(),
 		},
 	}, s.handleDeleteAccount)
@@ -262,7 +278,8 @@ func (s *Server) handleExportUserData(ctx context.Context, _ *struct{}) (*export
 }
 
 type deleteAccountInput struct {
-	DeleteConfirm
+	Confirm   string `query:"confirm" enum:"DELETE" required:"true" doc:"Must be the literal DELETE. The default action moves the account to the trash; permanent=true is irreversible."`
+	Permanent bool   `query:"permanent" doc:"Erase the account and all its data immediately instead of moving it to the trash. Irreversible. An account that emailed external recipients recently is moved to the trash instead (receipt erase_deferred:true) and purged at purge_after."`
 }
 
 type deleteAccountOutput struct {
@@ -279,19 +296,37 @@ func (s *Server) handleDeleteAccount(ctx context.Context, in *deleteAccountInput
 	if s.deps.DeleteUserData == nil {
 		return nil, NewError(http.StatusInternalServerError, "internal_error", "delete unavailable")
 	}
-	res, err := s.deps.DeleteUserData(ctx, user)
+	res, err := s.deps.DeleteUserData(ctx, user, in.Permanent)
 	if err != nil {
-		if errors.Is(err, identity.ErrSendInProgress) {
-			return nil, NewError(http.StatusConflict, "send_in_progress",
-				"an outbound provider call is still in progress; retry after it finishes")
-		}
-		return nil, NewError(http.StatusInternalServerError, "internal_error", "failed to delete user data")
+		return nil, accountDeleteError(err)
 	}
 	// Conform to the uniform delete-object shape: every delete op returns
 	// {deleted:true, ...}; the account receipt keeps its per-table cascade
 	// counts on top of that base.
 	res.Deleted = true
 	return &deleteAccountOutput{Body: res}, nil
+}
+
+// accountDeleteError maps a DeleteUserData failure to the envelope.
+func accountDeleteError(err error) error {
+	switch {
+	case errors.Is(err, identity.ErrSendInProgress):
+		return NewError(http.StatusConflict, "send_in_progress",
+			"an outbound provider call is still in progress; retry after it finishes")
+	case errors.Is(err, identity.ErrEraseHeld):
+		return NewError(http.StatusConflict, "erase_held",
+			"sending is paused for this account, so permanent erasure is held; delete without permanent=true to move the account to the trash")
+	case errors.Is(err, identity.ErrPurgeInProgress):
+		return NewError(http.StatusConflict, "purge_in_progress",
+			"permanent erasure of this account is already in progress")
+	case errors.Is(err, identity.ErrTombstoneKeyUnavailable):
+		// A dependency, not the caller: the account is left in the trash and
+		// the erase can be retried.
+		return NewError(http.StatusServiceUnavailable, "internal_error",
+			"account erasure is temporarily unavailable; the account remains in the trash — retry later")
+	default:
+		return NewError(http.StatusInternalServerError, "internal_error", "failed to delete user data")
+	}
 }
 
 func (s *Server) handleGetMyLimits(ctx context.Context, _ *struct{}) (*accountOutput, error) {
@@ -312,6 +347,13 @@ func (s *Server) handleGetMyLimits(ctx context.Context, _ *struct{}) (*accountOu
 	if err != nil {
 		return nil, NewError(http.StatusInternalServerError, "internal_error", "limits lookup failed")
 	}
+	var daily *sendramp.AccountDailyLimit
+	if s.deps.AccountDailyLimit != nil {
+		daily, err = s.deps.AccountDailyLimit(ctx, user.ID)
+		if err != nil {
+			return nil, NewError(http.StatusServiceUnavailable, "limits_unavailable", "daily sending limit is temporarily unavailable").WithDetails(RetryAfterDetails{RetryAfterSeconds: limitsUnavailableRetrySeconds}).WithRetryAfter(limitsUnavailableRetrySeconds)
+		}
+	}
 	var usage LimitsUsageView
 	if s.deps.GetUsage != nil {
 		usage = s.deps.GetUsage(ctx, user.ID)
@@ -323,6 +365,7 @@ func (s *Server) handleGetMyLimits(ctx context.Context, _ *struct{}) (*accountOu
 		agentAddress = p.AgentID
 	}
 	return &accountOutput{Body: AccountView{
+		DailyLimit:   daily,
 		User:         AccountUserView{ID: user.ID, Email: user.Email},
 		Scope:        p.Scope,
 		AgentAddress: agentAddress,
@@ -333,7 +376,12 @@ func (s *Server) handleGetMyLimits(ctx context.Context, _ *struct{}) (*accountOu
 			MaxMessagesMonth: caps.MaxMessagesMonth,
 			MaxStorageBytes:  caps.MaxStorageBytes,
 		},
-		Usage:      usage,
-		UpgradeURL: caps.UpgradeURL,
+		Usage:         usage,
+		UpgradeURL:    caps.UpgradeURL,
+		SendingAccess: s.accountSendingAccess(ctx, user.ID),
+		ReadOnly:      s.accountReadOnlyView(ctx, user.ID),
+		DeletedAt:     user.DeletedAt,
+		PurgeAfter:    user.PurgeAfter(),
+		RestoredAt:    user.RestoredAt,
 	}}, nil
 }

@@ -4,6 +4,7 @@ import type { Middleware } from '../middleware.js';
 
 import { APIKeyExportEntry } from '../models/APIKeyExportEntry.js';
 import { APIKeyView } from '../models/APIKeyView.js';
+import { AccountDailyLimit } from '../models/AccountDailyLimit.js';
 import { AccountMetricsView } from '../models/AccountMetricsView.js';
 import { AccountUserView } from '../models/AccountUserView.js';
 import { AccountView } from '../models/AccountView.js';
@@ -65,6 +66,7 @@ import { ErrorBody } from '../models/ErrorBody.js';
 import { ErrorEnvelope } from '../models/ErrorEnvelope.js';
 import { EventEnvelope } from '../models/EventEnvelope.js';
 import { EventView } from '../models/EventView.js';
+import { ExternalSendingNotEnabledDetails } from '../models/ExternalSendingNotEnabledDetails.js';
 import { FieldError } from '../models/FieldError.js';
 import { ForwardRequest } from '../models/ForwardRequest.js';
 import { ForwardRequestReplyTo } from '../models/ForwardRequestReplyTo.js';
@@ -132,6 +134,9 @@ import { RotateSecretResponse } from '../models/RotateSecretResponse.js';
 import { SPFResult } from '../models/SPFResult.js';
 import { SendEmailRequest } from '../models/SendEmailRequest.js';
 import { SendResultView } from '../models/SendResultView.js';
+import { SendingAccessRequestInput } from '../models/SendingAccessRequestInput.js';
+import { SendingAccessRequestView } from '../models/SendingAccessRequestView.js';
+import { SendingAccessView } from '../models/SendingAccessView.js';
 import { StarterTemplateDetailView } from '../models/StarterTemplateDetailView.js';
 import { StarterTemplateVariableView } from '../models/StarterTemplateVariableView.js';
 import { StarterTemplateView } from '../models/StarterTemplateView.js';
@@ -185,14 +190,30 @@ export interface AccountApiCreateApiKeyRequest {
     idempotencyKey?: string
 }
 
+export interface AccountApiCreateSendingAccessRequestRequest {
+    /**
+     *
+     * @type SendingAccessRequestInput
+     * @memberof AccountApicreateSendingAccessRequest
+     */
+    sendingAccessRequestInput: SendingAccessRequestInput
+}
+
 export interface AccountApiDeleteAccountRequest {
     /**
-     * Must be the literal DELETE — this action is irreversible.
+     * Must be the literal DELETE. The default action moves the account to the trash; permanent&#x3D;true is irreversible.
      * Defaults to: undefined
      * @type &#39;DELETE&#39;
      * @memberof AccountApideleteAccount
      */
     confirm: 'DELETE'
+    /**
+     * Erase the account and all its data immediately instead of moving it to the trash. Irreversible. An account that emailed external recipients recently is moved to the trash instead (receipt erase_deferred:true) and purged at purge_after.
+     * Defaults to: undefined
+     * @type boolean
+     * @memberof AccountApideleteAccount
+     */
+    permanent?: boolean
 }
 
 export interface AccountApiDeleteApiKeyRequest {
@@ -266,6 +287,9 @@ export interface AccountApiGetAccountMetricsRequest {
     groupBy?: 'agent'
 }
 
+export interface AccountApiGetSendingAccessRequestRequest {
+}
+
 export interface AccountApiListApiKeysRequest {
     /**
      * Opaque pagination cursor from a previous response\&#39;s next_cursor. Continuation requests must not change the other filters.
@@ -330,21 +354,39 @@ export class ObjectAccountApi {
     }
 
     /**
-     * Permanently deletes the account and cascades all owned data. Requires ?confirm=DELETE. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true plus per-table cascade counts) — like every delete op, which all return 200 + a deletion object.
-     * Delete your account + all data (irreversible)
+     * Files a request for support to review this account\'s external sending access. Idempotent while a request is pending: submitting again returns the existing pending request (200) instead of creating another (201). After a decline a new request may be filed as an appeal, up to 3 requests per 30 days (429 rate_limited beyond that). Filing a request never grants access by itself. 409 conflict when the account is not currently restricted (enforcement does not apply to it, it is already approved, or an available unlock already lifts the restriction) — nothing is filed. 501 not_implemented when the deployment does not enable external sending access. Account-scoped credentials only. Beta: external sending access is a platform control that ships disabled; this surface may evolve.
+     * Request external sending access (beta)
      * @param param the request object
      */
-    public deleteAccountWithHttpInfo(param: AccountApiDeleteAccountRequest, options?: ConfigurationOptions): Promise<HttpInfo<DeleteUserDataResult>> {
-        return this.api.deleteAccountWithHttpInfo(param.confirm,  options).toPromise();
+    public createSendingAccessRequestWithHttpInfo(param: AccountApiCreateSendingAccessRequestRequest, options?: ConfigurationOptions): Promise<HttpInfo<SendingAccessRequestView>> {
+        return this.api.createSendingAccessRequestWithHttpInfo(param.sendingAccessRequestInput,  options).toPromise();
     }
 
     /**
-     * Permanently deletes the account and cascades all owned data. Requires ?confirm=DELETE. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true plus per-table cascade counts) — like every delete op, which all return 200 + a deletion object.
-     * Delete your account + all data (irreversible)
+     * Files a request for support to review this account\'s external sending access. Idempotent while a request is pending: submitting again returns the existing pending request (200) instead of creating another (201). After a decline a new request may be filed as an appeal, up to 3 requests per 30 days (429 rate_limited beyond that). Filing a request never grants access by itself. 409 conflict when the account is not currently restricted (enforcement does not apply to it, it is already approved, or an available unlock already lifts the restriction) — nothing is filed. 501 not_implemented when the deployment does not enable external sending access. Account-scoped credentials only. Beta: external sending access is a platform control that ships disabled; this surface may evolve.
+     * Request external sending access (beta)
+     * @param param the request object
+     */
+    public createSendingAccessRequest(param: AccountApiCreateSendingAccessRequestRequest, options?: ConfigurationOptions): Promise<SendingAccessRequestView> {
+        return this.api.createSendingAccessRequest(param.sendingAccessRequestInput,  options).toPromise();
+    }
+
+    /**
+     * Moves the account to the trash. Requires ?confirm=DELETE. The account becomes unusable at once: every API key, OAuth grant and dashboard session is revoked, every agent is trashed (inbound mail is refused), sending stops, and every custom domain loses its verification. Signing in to the dashboard before purge_after offers a restore — keys stay revoked and domains must be re-verified — after which the account and all its data are purged permanently (the trash window is deployment-configurable; 30 days by default). Pass permanent=true to erase the account and all its data immediately instead (refused with 409 erase_held while the account\'s sending is paused). An account that emailed external recipients recently (within a deployment-configured window, 14 days by default) is not erased at once even with permanent=true: it is moved to the trash like a default delete and purged at purge_after, so delivery feedback such as spam complaints that arrives after a send still reaches it; the receipt then has mode trash, erase_deferred:true, purge_after and a message, and the owner can still restore it before purge_after. On deployments that disable account trash, every deletion is permanent. Either way the account\'s sign-in identity may be held for a period after deletion and cannot immediately register a new account. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true, mode, and per-table counts) — like every delete op, which all return 200 + a deletion object.
+     * Delete your account (trash by default; permanent=true erases now)
+     * @param param the request object
+     */
+    public deleteAccountWithHttpInfo(param: AccountApiDeleteAccountRequest, options?: ConfigurationOptions): Promise<HttpInfo<DeleteUserDataResult>> {
+        return this.api.deleteAccountWithHttpInfo(param.confirm, param.permanent,  options).toPromise();
+    }
+
+    /**
+     * Moves the account to the trash. Requires ?confirm=DELETE. The account becomes unusable at once: every API key, OAuth grant and dashboard session is revoked, every agent is trashed (inbound mail is refused), sending stops, and every custom domain loses its verification. Signing in to the dashboard before purge_after offers a restore — keys stay revoked and domains must be re-verified — after which the account and all its data are purged permanently (the trash window is deployment-configurable; 30 days by default). Pass permanent=true to erase the account and all its data immediately instead (refused with 409 erase_held while the account\'s sending is paused). An account that emailed external recipients recently (within a deployment-configured window, 14 days by default) is not erased at once even with permanent=true: it is moved to the trash like a default delete and purged at purge_after, so delivery feedback such as spam complaints that arrives after a send still reaches it; the receipt then has mode trash, erase_deferred:true, purge_after and a message, and the owner can still restore it before purge_after. On deployments that disable account trash, every deletion is permanent. Either way the account\'s sign-in identity may be held for a period after deletion and cannot immediately register a new account. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true, mode, and per-table counts) — like every delete op, which all return 200 + a deletion object.
+     * Delete your account (trash by default; permanent=true erases now)
      * @param param the request object
      */
     public deleteAccount(param: AccountApiDeleteAccountRequest, options?: ConfigurationOptions): Promise<DeleteUserDataResult> {
-        return this.api.deleteAccount(param.confirm,  options).toPromise();
+        return this.api.deleteAccount(param.confirm, param.permanent,  options).toPromise();
     }
 
     /**
@@ -438,6 +480,24 @@ export class ObjectAccountApi {
     }
 
     /**
+     * The account\'s most recent request for external sending access, with its review state. 404 not_found when the account has never filed one; 501 not_implemented when the deployment does not enable external sending access. Account-scoped credentials only. Beta: external sending access is a platform control that ships disabled; this surface may evolve.
+     * Get your latest external sending access request (beta)
+     * @param param the request object
+     */
+    public getSendingAccessRequestWithHttpInfo(param: AccountApiGetSendingAccessRequestRequest = {}, options?: ConfigurationOptions): Promise<HttpInfo<SendingAccessRequestView>> {
+        return this.api.getSendingAccessRequestWithHttpInfo( options).toPromise();
+    }
+
+    /**
+     * The account\'s most recent request for external sending access, with its review state. 404 not_found when the account has never filed one; 501 not_implemented when the deployment does not enable external sending access. Account-scoped credentials only. Beta: external sending access is a platform control that ships disabled; this surface may evolve.
+     * Get your latest external sending access request (beta)
+     * @param param the request object
+     */
+    public getSendingAccessRequest(param: AccountApiGetSendingAccessRequestRequest = {}, options?: ConfigurationOptions): Promise<SendingAccessRequestView> {
+        return this.api.getSendingAccessRequest( options).toPromise();
+    }
+
+    /**
      * API keys for the account (metadata only — secrets are shown once, at creation). Account scope only: an agent-scoped credential cannot manage keys.
      * List API keys
      * @param param the request object
@@ -519,7 +579,7 @@ export interface AgentsApiDeleteAgentRequest {
      */
     confirm: 'DELETE'
     /**
-     * Delete irreversibly right away instead of moving to the trash. Accepts live and trashed agents.
+     * Delete irreversibly right away instead of moving to the trash. Accepts live and trashed agents. An agent that emailed external recipients recently is moved to the trash instead (receipt erase_deferred:true) and purged at purge_after.
      * Defaults to: undefined
      * @type boolean
      * @memberof AgentsApideleteAgent
@@ -719,7 +779,7 @@ export class ObjectAgentsApi {
     }
 
     /**
-     * Move an agent the caller owns to the trash. Requires ?confirm=DELETE. A trashed agent stops receiving mail, disappears from lists, and its held messages leave the review queue; restore it via POST /v1/agents/{email}/restore within the trash retention window — 30 days by default (deployment-configurable) — after which it is purged permanently (messages included). Live message data is otherwise retained indefinitely. Pass permanent=true to skip the trash and delete irreversibly right away (accepts live and trashed agents). Returns 200 with a deletion receipt; messages_deleted is zero when the agent is moved to trash.
+     * Move an agent the caller owns to the trash. Requires ?confirm=DELETE. A trashed agent stops receiving mail, disappears from lists, and its held messages leave the review queue; restore it via POST /v1/agents/{email}/restore within the trash retention window — 30 days by default (deployment-configurable) — after which it is purged permanently (messages included). Live message data is otherwise retained indefinitely. Pass permanent=true to skip the trash and delete irreversibly right away (accepts live and trashed agents; refused with 409 erase_held while the account\'s sending is paused). An agent that emailed external recipients recently (within a deployment-configured window, 14 days by default) is not deleted at once even with permanent=true: it is moved to the trash (or stays there) and purged at purge_after, so delivery feedback such as spam complaints still reaches it; the receipt then has erase_deferred:true, purge_after and a message. Returns 200 with a deletion receipt; messages_deleted is zero when the agent is moved to trash.
      * Delete an agent
      * @param param the request object
      */
@@ -728,7 +788,7 @@ export class ObjectAgentsApi {
     }
 
     /**
-     * Move an agent the caller owns to the trash. Requires ?confirm=DELETE. A trashed agent stops receiving mail, disappears from lists, and its held messages leave the review queue; restore it via POST /v1/agents/{email}/restore within the trash retention window — 30 days by default (deployment-configurable) — after which it is purged permanently (messages included). Live message data is otherwise retained indefinitely. Pass permanent=true to skip the trash and delete irreversibly right away (accepts live and trashed agents). Returns 200 with a deletion receipt; messages_deleted is zero when the agent is moved to trash.
+     * Move an agent the caller owns to the trash. Requires ?confirm=DELETE. A trashed agent stops receiving mail, disappears from lists, and its held messages leave the review queue; restore it via POST /v1/agents/{email}/restore within the trash retention window — 30 days by default (deployment-configurable) — after which it is purged permanently (messages included). Live message data is otherwise retained indefinitely. Pass permanent=true to skip the trash and delete irreversibly right away (accepts live and trashed agents; refused with 409 erase_held while the account\'s sending is paused). An agent that emailed external recipients recently (within a deployment-configured window, 14 days by default) is not deleted at once even with permanent=true: it is moved to the trash (or stays there) and purged at purge_after, so delivery feedback such as spam complaints still reaches it; the receipt then has erase_deferred:true, purge_after and a message. Returns 200 with a deletion receipt; messages_deleted is zero when the agent is moved to trash.
      * Delete an agent
      * @param param the request object
      */
@@ -1576,7 +1636,7 @@ export class ObjectDomainsApi {
     }
 
     /**
-     * Deletes the domain (refused with 400 domain_has_agents while any live or trashed agent exists on it) and commits durable teardown of its sending identity. The provider-side identity is normally removed before the response returns; otherwise sending_teardown is pending (durable retries, including provider-disabled managed identities) or manual_review (an identity exists but ownership cannot be established). Send a unique Idempotency-Key for each logical deletion and reuse that key after an ambiguous network failure: within the published key-retention window, the key is committed with an incarnation-bound receipt, follows pending to confirmed, and cannot delete a later registration of the same domain. A retry after that window is a new operation. Use a new key to delete a replacement registration. Without a key, repeating DELETE only polls while the domain remains absent and is unsafe across re-registration. Keep DNS published unless sending_teardown is confirmed; treat missing or unknown values as not confirmed. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain, sending_teardown}).
+     * Deletes the domain (refused with 400 domain_has_agents while any live or trashed agent exists on it; an agent that emailed external recipients recently cannot be permanently deleted until its trash window ends — its permanent delete answers erase_deferred — so the domain stays blocked until that agent is purged) and commits durable teardown of its sending identity. The provider-side identity is normally removed before the response returns; otherwise sending_teardown is pending (durable retries, including provider-disabled managed identities) or manual_review (an identity exists but ownership cannot be established). Send a unique Idempotency-Key for each logical deletion and reuse that key after an ambiguous network failure: within the published key-retention window, the key is committed with an incarnation-bound receipt, follows pending to confirmed, and cannot delete a later registration of the same domain. A retry after that window is a new operation. Use a new key to delete a replacement registration. Without a key, repeating DELETE only polls while the domain remains absent and is unsafe across re-registration. Keep DNS published unless sending_teardown is confirmed; treat missing or unknown values as not confirmed. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain, sending_teardown}).
      * Delete a domain
      * @param param the request object
      */
@@ -1585,7 +1645,7 @@ export class ObjectDomainsApi {
     }
 
     /**
-     * Deletes the domain (refused with 400 domain_has_agents while any live or trashed agent exists on it) and commits durable teardown of its sending identity. The provider-side identity is normally removed before the response returns; otherwise sending_teardown is pending (durable retries, including provider-disabled managed identities) or manual_review (an identity exists but ownership cannot be established). Send a unique Idempotency-Key for each logical deletion and reuse that key after an ambiguous network failure: within the published key-retention window, the key is committed with an incarnation-bound receipt, follows pending to confirmed, and cannot delete a later registration of the same domain. A retry after that window is a new operation. Use a new key to delete a replacement registration. Without a key, repeating DELETE only polls while the domain remains absent and is unsafe across re-registration. Keep DNS published unless sending_teardown is confirmed; treat missing or unknown values as not confirmed. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain, sending_teardown}).
+     * Deletes the domain (refused with 400 domain_has_agents while any live or trashed agent exists on it; an agent that emailed external recipients recently cannot be permanently deleted until its trash window ends — its permanent delete answers erase_deferred — so the domain stays blocked until that agent is purged) and commits durable teardown of its sending identity. The provider-side identity is normally removed before the response returns; otherwise sending_teardown is pending (durable retries, including provider-disabled managed identities) or manual_review (an identity exists but ownership cannot be established). Send a unique Idempotency-Key for each logical deletion and reuse that key after an ambiguous network failure: within the published key-retention window, the key is committed with an incarnation-bound receipt, follows pending to confirmed, and cannot delete a later registration of the same domain. A retry after that window is a new operation. Use a new key to delete a replacement registration. Without a key, repeating DELETE only polls while the domain remains absent and is unsafe across re-registration. Keep DNS published unless sending_teardown is confirmed; treat missing or unknown values as not confirmed. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain, sending_teardown}).
      * Delete a domain
      * @param param the request object
      */
@@ -2211,7 +2271,7 @@ export class ObjectMessagesApi {
     }
 
     /**
-     * Move a message to the trash. Trashed messages disappear from lists, threads, and reply targets, but can be restored via POST …/messages/{id}/restore until they are purged — 30 days after deletion by default (the trash retention window is deployment-configurable). Live message data is otherwise retained indefinitely. No confirmation is required because the default delete is reversible. Pass permanent=true with confirm=DELETE to permanently delete a message that is ALREADY in the trash (\"delete forever\"). A message held for review (review_status=pending_review) cannot be deleted — resolve it in the review queue first (409 message_held). Returns 409 send_in_progress if provider submission has already started; retry after it finishes.
+     * Move a message to the trash. Trashed messages disappear from lists, threads, and reply targets, but can be restored via POST …/messages/{id}/restore until they are purged — 30 days after deletion by default (the trash retention window is deployment-configurable). Live message data is otherwise retained indefinitely. No confirmation is required because the default delete is reversible. Pass permanent=true with confirm=DELETE to permanently delete a message that is ALREADY in the trash (\"delete forever\"); a message sent to external recipients recently (within a deployment-configured window, 14 days by default) is not deleted at once — it stays in the trash and is purged at purge_after, and the receipt has erase_deferred:true, purge_after and a message. A message held for review (review_status=pending_review) cannot be deleted — resolve it in the review queue first (409 message_held). Returns 409 send_in_progress if provider submission has already started; retry after it finishes.
      * Delete a message (move to trash)
      * @param param the request object
      */
@@ -2220,7 +2280,7 @@ export class ObjectMessagesApi {
     }
 
     /**
-     * Move a message to the trash. Trashed messages disappear from lists, threads, and reply targets, but can be restored via POST …/messages/{id}/restore until they are purged — 30 days after deletion by default (the trash retention window is deployment-configurable). Live message data is otherwise retained indefinitely. No confirmation is required because the default delete is reversible. Pass permanent=true with confirm=DELETE to permanently delete a message that is ALREADY in the trash (\"delete forever\"). A message held for review (review_status=pending_review) cannot be deleted — resolve it in the review queue first (409 message_held). Returns 409 send_in_progress if provider submission has already started; retry after it finishes.
+     * Move a message to the trash. Trashed messages disappear from lists, threads, and reply targets, but can be restored via POST …/messages/{id}/restore until they are purged — 30 days after deletion by default (the trash retention window is deployment-configurable). Live message data is otherwise retained indefinitely. No confirmation is required because the default delete is reversible. Pass permanent=true with confirm=DELETE to permanently delete a message that is ALREADY in the trash (\"delete forever\"); a message sent to external recipients recently (within a deployment-configured window, 14 days by default) is not deleted at once — it stays in the trash and is purged at purge_after, and the receipt has erase_deferred:true, purge_after and a message. A message held for review (review_status=pending_review) cannot be deleted — resolve it in the review queue first (409 message_held). Returns 409 send_in_progress if provider submission has already started; retry after it finishes.
      * Delete a message (move to trash)
      * @param param the request object
      */

@@ -11,6 +11,25 @@ describe("API error exit classification", () => {
   it("keeps retryable API errors transient", () => {
     expect(exitCodeForAPIError({ code: "rate_limited", retryable: true })).toBe(EXIT.ERROR);
   });
+
+  it("maps external_sending_not_enabled to the permanent-request code, not AUTH", () => {
+    // It's a 403 PERMISSION error like forbidden/sending_paused, but only
+    // unauthorized/forbidden get the AUTH bucket (fix your key) — this one is
+    // "your recipients are out of scope for this key", which is REQUEST (5):
+    // do not retry the identical invocation, but the credential itself is fine.
+    expect(
+      exitCodeForAPIError({ code: "external_sending_not_enabled", retryable: false }),
+    ).toBe(EXIT.REQUEST);
+  });
+});
+
+describe("account_read_only exit classification", () => {
+  it("maps account_read_only to its own READ_ONLY code, not AUTH or REQUEST", () => {
+    // The credential is valid (not AUTH) and the invocation is fine (not
+    // REQUEST): the account itself is frozen for an abuse review, so no write
+    // succeeds until an operator resumes it.
+    expect(exitCodeForAPIError({ code: "account_read_only", retryable: false })).toBe(EXIT.READ_ONLY);
+  });
 });
 
 describe("exit code contract", () => {
@@ -25,5 +44,6 @@ describe("exit code contract", () => {
     expect(EXIT.SEND_OUTCOME).toBe(7);
     expect(EXIT.WARN).toBe(8);
     expect(EXIT.CONFIG).toBe(9);
+    expect(EXIT.READ_ONLY).toBe(10);
   });
 });

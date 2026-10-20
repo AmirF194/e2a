@@ -16,6 +16,10 @@
  *   E2A_URL             staging base URL (or a local tunnel)
  *   E2A_API_KEY         an account-scoped key for the target account
  *   E2A_SHARED_DOMAIN   shared domain for throwaway agents (e.g. agents-staging.e2a.dev)
+ *   E2A_DISPOSABLE_API_KEY  optional: account-scoped key of a throwaway account
+ *                       minted for THIS run (@example.test email, no domains).
+ *                       `account delete` erases it; unset, that test skips and
+ *                       the coverage gate allowlists `account`.
  */
 import { describe, it, expect, afterAll } from "vitest";
 import { spawnSync, spawn } from "node:child_process";
@@ -176,6 +180,7 @@ describe.skipIf(!live)("cli live parity", () => {
     // loudly and specifically HERE, not just as a silent shift in the gate's
     // total — a human reviewing this diff should see exactly what changed.
     expect(commands).toEqual([
+      "account",
       "agents",
       "config",
       "contacts",
@@ -188,10 +193,68 @@ describe.skipIf(!live)("cli live parity", () => {
       "protection",
       "reply",
       "send",
+      "sending-access",
       "suppressions",
       "whoami",
     ]);
     recordAdvertised(commands);
+  });
+
+  // `account delete` destroys the account it runs as, so it runs ONLY
+  // against a throwaway account the pipeline mints per run
+  // (E2A_DISPOSABLE_API_KEY) — never the account the rest of this suite
+  // uses. Same guards as tests/e2e-prod/suites/19-account.test.ts: a
+  // different account, a synthetic @example.test email, zero domains, and an
+  // explicit opt-in on a production origin. Always --permanent, so a run
+  // leaves nothing in the trash.
+  const DISPOSABLE = (process.env.E2A_DISPOSABLE_API_KEY || "").trim();
+  const disposableSkip = DISPOSABLE
+    ? false
+    : "E2A_DISPOSABLE_API_KEY is not set — `account delete` runs only against a pipeline-minted throwaway account; the coverage gate allowlists `account` while the key is absent";
+  it.skipIf(Boolean(disposableSkip))(
+    "account delete --permanent --yes --json erases a disposable account and revokes its key",
+    async () => {
+      expect(DISPOSABLE).not.toBe(KEY);
+      const host = new URL(URL_).hostname;
+      if (host === "api.e2a.dev" || host === "e2a.dev") {
+        expect(
+          process.env.E2E_ALLOW_DISPOSABLE_DELETE_PROD,
+          "refusing to erase an account on a production origin without E2E_ALLOW_DISPOSABLE_DELETE_PROD=1",
+        ).toBe("1");
+      }
+      const get = async (path: string, key: string) => {
+        const res = await fetch(`${URL_}${path}`, { headers: { Authorization: `Bearer ${key}` } });
+        expect(res.status, `${path}: ${res.status}`).toBe(200);
+        return res.json() as Promise<Record<string, unknown>>;
+      };
+      const disposable = (await get("/v1/account", DISPOSABLE)) as { user: { id: string; email: string }; scope: string };
+      const primary = (await get("/v1/account", KEY)) as { user: { id: string } };
+      expect(disposable.scope).toBe("account");
+      expect(disposable.user.email, "refusing to delete: not a synthetic @example.test account").toMatch(/@example\.test$/i);
+      expect(disposable.user.id, "refusing to delete: the disposable key resolves to the suite's account").not.toBe(primary.user.id);
+      const domains = (await get("/v1/domains", DISPOSABLE)) as { items: unknown[] };
+      expect(domains.items.length, "refusing to delete: the disposable account owns domains").toBe(0);
+
+      const r = run(["account", "delete", "--permanent", "--yes", "--json"], { E2A_API_KEY: DISPOSABLE });
+      expect(r.code, r.stderr).toBe(0);
+      const receipt = JSON.parse(r.stdout);
+      expect(receipt.deleted).toBe(true);
+      expect(receipt.mode).toBe("permanent");
+      expect(receipt.userDeleted).toBe(true);
+
+      // The erased account's key is dead: whoami exits with the auth code.
+      const after = run(["whoami", "--json"], { E2A_API_KEY: DISPOSABLE });
+      expect(after.code, after.stderr).toBe(4);
+      recordCovered("account");
+    },
+  );
+
+  it("account delete refuses without --yes when stdin is not a TTY (exit 2, no request)", () => {
+    // Safe against the suite's own account: the refusal happens before any
+    // network call. A failure-mode check, so it does not count as coverage.
+    const r = run(["account", "delete"]);
+    expect(r.code).toBe(2);
+    expect(r.stderr).toMatch(/--yes/);
   });
 
   it("whoami --json → identity (exit 0)", () => {
@@ -201,6 +264,34 @@ describe.skipIf(!live)("cli live parity", () => {
     expect(j.user?.email).toBeTruthy();
     expect(j.scope).toBe("account");
     recordCovered("whoami");
+  });
+
+  // External sending access (beta): file (idempotent while pending — reruns
+  // converge on one pending request for this shared account and never
+  // approach the per-account cap), then read the status. A deployment that
+  // does not enable the control answers 501 not_implemented to the request;
+  // then nothing is recorded and the gate reports the gap, which is correct.
+  it("sending-access request --json → status --json shows the same request (exit 0)", (ctx) => {
+    const filed = run([
+      "sending-access", "request",
+      "--use-case", "cli coverage probe: verifies the request intake contract",
+      "--recipients", "no recipients; this request exists only for automated coverage",
+      "--volume", "1", "--json",
+    ]);
+    if (filed.code !== 0 && /not_implemented|not enabled/i.test(filed.stderr)) {
+      ctx.skip();
+      return;
+    }
+    expect(filed.code, filed.stderr).toBe(0);
+    const req = JSON.parse(filed.stdout);
+    expect(req.id).toBeTruthy();
+    expect(typeof req.state).toBe("string");
+
+    const status = run(["sending-access", "status", "--json"]);
+    expect(status.code, status.stderr).toBe(0);
+    const st = JSON.parse(status.stdout);
+    expect(st.latestRequest?.id).toBe(req.id);
+    recordCovered("sending-access");
   });
 
   it("metrics: account rollup and per-inbox, both --json (exit 0)", () => {

@@ -172,6 +172,8 @@ type API struct {
 	store             *identity.Store
 	sender            *outbound.Sender
 	unsubscribeIssuer ManagedUnsubscribeIssuer
+	// supportContact is named in account_read_only refusals (read_only.go).
+	supportContact string
 	// screen runs outbound content screening (Slice 5). Stateless heuristics
 	// engine; mirrors the relay's inbound piguard engine.
 	screen *piguard.Engine
@@ -186,7 +188,10 @@ type API struct {
 	// unset means the platform cannot send feedback mail.
 	submitter *outbound.ProviderSubmitter
 	gate      sendingpolicy.Gate
-	userAuth  *auth.UserAuth
+	// externalAccess is the external-sending-access preflight/status role;
+	// nil skips the API preflight (the gate still enforces).
+	externalAccess sendingpolicy.ExternalAccess
+	userAuth       *auth.UserAuth
 	// oidcAuth wires optional, generic OpenID Connect browser login. Nil means
 	// both OIDC routes are absent; it is independent of legacy Google login.
 	oidcAuth   *auth.OIDCAuth
@@ -231,8 +236,9 @@ type API struct {
 	delegatedIssuer       string                // config delegated.issuer_url; when empty, external-principal attach returns 503
 	delegated             DelegatedVerifier     // optional; nil ⇒ delegated-owned (at+jwt) tokens always fail auth
 
-	delegatedLookup DelegatedIdentityLookup // external-principal store seam; defaults to store
-	billingHookURL  string                  // optional; when set, handleDeleteUserData POSTs an HMAC-signed user-deleted notice here (sidecar's /api/internal/billing/cancel)
+	delegatedLookup        DelegatedIdentityLookup // external-principal store seam; defaults to store
+	billingAccountStateURL string                  // optional; trash/restore transitions (never the cancel hook)
+	billingHookURL         string                  // optional; when set, handleDeleteUserData POSTs an HMAC-signed user-deleted notice here (sidecar's /api/internal/billing/cancel)
 	// subscriberStore powers the slice-2 webhooks-as-a-resource
 	// /webhooks/{id}/test and /webhooks/{id}/deliveries endpoints.
 	// Optional — when nil, those endpoints return 404 (the rest of
@@ -605,6 +611,11 @@ func (a *API) SetDelegatedIssuer(issuer string) { a.delegatedIssuer = issuer }
 // for the signature.
 func (a *API) SetBillingHookURL(s string) { a.billingHookURL = s }
 
+// SetBillingAccountStateURL wires the account-trash transition endpoint
+// (trash/restore). Empty derives the sibling path "account-state" of the
+// billing hook URL. See config.LimitsConfig.BillingAccountStateURL.
+func (a *API) SetBillingAccountStateURL(s string) { a.billingAccountStateURL = s }
+
 // SetDomainTeardownHook wires the per-domain SES deprovision enqueue run in the
 // account-delete transaction (decision 4 / Slice 4). Optional.
 func (a *API) SetDomainTeardownHook(h func(ctx context.Context, tx pgx.Tx, domain string) error) {
@@ -693,6 +704,10 @@ func (a *API) RegisterRoutes(r *mux.Router) {
 	r.MethodNotAllowedHandler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	})
+
+	// Read-only accounts: the single enforcement point for this router's
+	// account-write routes (read_only.go). Runs on matched routes only.
+	r.Use(a.legacyReadOnlyMiddleware)
 
 	// Internal machine-to-machine endpoint: the external limits
 	// provisioner (hosted billing sidecar) calls this to bust the
@@ -1246,8 +1261,10 @@ func (a *API) HoldForApprovalCoreThreaded(ctx context.Context, agent *identity.A
 			if err != nil {
 				return err
 			}
-			if err := a.store.StampNotifyJobIDTx(ctx, tx, m.ID, jobID); err != nil {
-				return err
+			if jobID != 0 { // 0 = no notice (the owning account is in the trash)
+				if err := a.store.StampNotifyJobIDTx(ctx, tx, m.ID, jobID); err != nil {
+					return err
+				}
 			}
 			// Preserve the caller's schedule across the hold (#815). The column is
 			// stamped in the same tx as the row so the held draft carries send_at
@@ -1463,6 +1480,11 @@ func (a *API) DeliverOutbound(ctx context.Context, user *identity.User, agent *i
 	if supErr := a.checkSuppression(ctx, user.ID, agent.ID, req); supErr != nil {
 		return nil, supErr
 	}
+	// External sending access: refuse before screening can durably hold a
+	// draft the account could never send, and before anything is persisted.
+	if xerr := a.preflightExternalAccess(ctx, user.ID, agent.ID, req); xerr != nil {
+		return nil, xerr
+	}
 
 	// Conversation threading (#328): resolve the thread id once, here, so every
 	// downstream use — the X-E2A-Conversation-Id header (compose), the
@@ -1622,6 +1644,11 @@ func (a *API) DeliverOutbound(ctx context.Context, user *identity.User, agent *i
 			// committed — the message row rolled back with the job.
 			return nil, &OutboundError{Status: http.StatusForbidden, Code: "sending_paused", Msg: "sending is paused for this account"}
 		}
+		if errors.Is(txErr, outboundsend.ErrExternalSendingNotEnabled) {
+			// The gate refused the durable envelope inside the accept
+			// transaction (a change after the preflight). Nothing committed.
+			return nil, a.externalSendingNotEnabledError(ctx, user.ID)
+		}
 		log.Printf("[api] async accept tx failed: agent=%s to_count=%d to_domains=%v error=%v", agent.Domain, len(req.To), logredact.AddressDomains(req.To), txErr)
 		return nil, &OutboundError{Status: http.StatusInternalServerError, Code: "internal_error", Msg: "failed to accept message for send"}
 	}
@@ -1756,6 +1783,9 @@ func (a *API) acceptPlatformSend(ctx context.Context, agent *identity.AgentIdent
 	}); txErr != nil {
 		if errors.Is(txErr, outboundsend.ErrSendingPaused) {
 			return nil, &OutboundError{Status: http.StatusForbidden, Code: "sending_paused", Msg: "sending is paused for this account"}
+		}
+		if errors.Is(txErr, outboundsend.ErrExternalSendingNotEnabled) {
+			return nil, a.externalSendingNotEnabledError(ctx, agent.UserID)
 		}
 		log.Printf("[api] platform accept tx failed: agent=%s to_count=%d to_domains=%v error=%v", agent.Domain, len(req.To), logredact.AddressDomains(req.To), txErr)
 		return nil, &OutboundError{Status: http.StatusInternalServerError, Code: "internal_error", Msg: "failed to accept message for send"}

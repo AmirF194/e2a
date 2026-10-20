@@ -11,6 +11,11 @@
  * Requires env vars (same as contract.test.ts):
  *   E2A_TEST_BASE_URL  — test server URL
  *   E2A_TEST_API_KEY   — valid API key for the test user
+ *   E2A_TEST_RESTRICTED_SDK_API_KEY — optional; key for the contract server's
+ *     SDK-only account inside the external-sending-access enforcement cohort.
+ *     The account.getSendingAccessRequest / .requestSendingAccess lifecycle
+ *     below runs as that account and skips without it (a deployed staging
+ *     target has no such account), mirroring the capped/over-cap accounts.
  *
  * Contract-server send topology (cmd/e2a-contract-server): the real River
  * enqueuer is wired but its outbound worker is not started, so external sends
@@ -21,10 +26,11 @@
  */
 import { describe, it, expect } from "vitest";
 import { E2AClient } from "../../src/v1/client.js";
-import { E2ANotFoundError } from "../../src/v1/errors.js";
+import { E2AConflictError, E2ANotFoundError } from "../../src/v1/errors.js";
 
 const baseUrl = process.env.E2A_TEST_BASE_URL;
 const apiKey = process.env.E2A_TEST_API_KEY;
+const restrictedSdkApiKey = process.env.E2A_TEST_RESTRICTED_SDK_API_KEY;
 
 /** Shared-domain slug — must satisfy the server's ^[a-z0-9][a-z0-9-]{0,38}[a-z0-9]$
  *  rule (2–40 chars, no underscores). */
@@ -36,7 +42,7 @@ describe.skipIf(!baseUrl || !apiKey)("E2AClient contract (high-level)", () => {
   const client = new E2AClient({ apiKey: apiKey!, baseUrl: baseUrl! });
 
   it("messages.send with wait: \"sent\" returns the terminal loopback result", async () => {
-    const email = `${slug("sdkc-wait")}@agents.e2a.dev`;
+    const email = `${slug("sdkc-wait")}@agents.localhost`;
     await client.agents.create({ email });
     try {
       const res = await client.messages.send(
@@ -53,7 +59,7 @@ describe.skipIf(!baseUrl || !apiKey)("E2AClient contract (high-level)", () => {
   });
 
   it("messages.getMetrics keeps rates null without outward traffic and numeric with it", async () => {
-    const email = `${slug("sdkc-metrics")}@agents.e2a.dev`;
+    const email = `${slug("sdkc-metrics")}@agents.localhost`;
     await client.agents.create({ email });
     try {
       // A brand-new agent has no traffic. Every rate must come back null, not
@@ -114,7 +120,7 @@ describe.skipIf(!baseUrl || !apiKey)("E2AClient contract (high-level)", () => {
   });
 
   it("account.metrics rolls up every agent and can break down by agent", async () => {
-    const email = `${slug("sdkc-acct")}@agents.e2a.dev`;
+    const email = `${slug("sdkc-acct")}@agents.localhost`;
     await client.agents.create({ email });
     try {
       await client.messages.send(
@@ -144,7 +150,7 @@ describe.skipIf(!baseUrl || !apiKey)("E2AClient contract (high-level)", () => {
   });
 
   it("agents.delete with permanent: true removes the agent immediately", async () => {
-    const email = `${slug("sdkc-del")}@agents.e2a.dev`;
+    const email = `${slug("sdkc-del")}@agents.localhost`;
     await client.agents.create({ email });
 
     const receipt = await client.agents.delete(email, { permanent: true });
@@ -179,7 +185,7 @@ describe.skipIf(!baseUrl || !apiKey)("E2AClient contract (high-level)", () => {
     // on update the stored validator never matches "undefined", and a
     // conditional request never creates a first enrolment. Only a live server
     // can prove the header truly stays off the wire end to end.
-    const email = `${slug("sdkc-ifm")}@agents.e2a.dev`;
+    const email = `${slug("sdkc-ifm")}@agents.localhost`;
     const address = `${slug("sdkc-ifm-c")}@fund.vc`;
     await client.agents.create({ email });
     try {
@@ -213,3 +219,66 @@ describe.skipIf(!baseUrl || !apiKey)("E2AClient contract (high-level)", () => {
     }
   });
 });
+
+// The external-sending-access request lifecycle runs as the contract server's
+// SDK-only RESTRICTED account (E2A_TEST_RESTRICTED_SDK_API_KEY): inside the
+// cohort, used by no shared scenario, so it starts with no request and this
+// test is its only filer — no race with the raw-HTTP scenario that must be
+// the first filer on the scenario restricted account. A filed request is
+// private support history with no customer delete, which is why it is kept
+// off the shared primary account. Skips without the key (a deployed target
+// has no such account), like the capped/over-cap accounts.
+describe.skipIf(!baseUrl || !restrictedSdkApiKey)(
+  "E2AClient contract (restricted account: external sending access)",
+  () => {
+    const client = new E2AClient({ apiKey: restrictedSdkApiKey!, baseUrl: baseUrl! });
+
+    it("getSendingAccessRequest → requestSendingAccess → get → idempotent replay", async () => {
+      await expect(client.account.getSendingAccessRequest()).rejects.toBeInstanceOf(E2ANotFoundError);
+
+      const created = await client.account.requestSendingAccess({
+        useCase: "sdk contract probe",
+        recipients: "our own customers who signed up",
+        expectedDailyVolume: 250,
+      });
+      expect(created.state).toBe("pending");
+      expect(created.useCase).toBe("sdk contract probe");
+      expect(created.expectedDailyVolume).toBe(250);
+      expect(created.createdAt).toBeInstanceOf(Date);
+
+      const fetched = await client.account.getSendingAccessRequest();
+      expect(fetched.id).toBe(created.id);
+      expect(fetched.state).toBe("pending");
+
+      // Idempotent while pending: different fields, SAME request back (200).
+      const replay = await client.account.requestSendingAccess({
+        useCase: "a different reason",
+        recipients: "someone else",
+        expectedDailyVolume: 999,
+      });
+      expect(replay.id).toBe(created.id);
+      expect(replay.useCase).toBe("sdk contract probe");
+      expect(replay.expectedDailyVolume).toBe(250);
+    });
+  },
+);
+
+// The PRIMARY account is outside the contract cohort (unrestricted): there is
+// nothing to request, so the server answers 409 conflict, mapped to
+// E2AConflictError, and nothing is filed.
+describe.skipIf(!baseUrl || !apiKey || !restrictedSdkApiKey)(
+  "E2AClient contract (unrestricted account: external sending access)",
+  () => {
+    const client = new E2AClient({ apiKey: apiKey!, baseUrl: baseUrl! });
+
+    it("requestSendingAccess on an unrestricted account is E2AConflictError (409 conflict)", async () => {
+      const err = await client.account
+        .requestSendingAccess({ useCase: "sdk contract probe", recipients: "our own customers", expectedDailyVolume: 1 })
+        .then(() => undefined, (e: unknown) => e);
+      expect(err).toBeInstanceOf(E2AConflictError);
+      expect((err as E2AConflictError).code).toBe("conflict");
+      expect((err as E2AConflictError).status).toBe(409);
+      await expect(client.account.getSendingAccessRequest()).rejects.toBeInstanceOf(E2ANotFoundError);
+    });
+  },
+);

@@ -40,6 +40,7 @@ __all__ = [
     "ApiException",
     "APIKeyExportEntry",
     "APIKeyView",
+    "AccountDailyLimit",
     "AccountMetricsView",
     "AccountUserView",
     "AccountView",
@@ -104,6 +105,7 @@ __all__ = [
     "ErrorEnvelope",
     "EventEnvelope",
     "EventView",
+    "ExternalSendingNotEnabledDetails",
     "FieldError",
     "ForwardRequest",
     "ForwardRequestReplyTo",
@@ -171,6 +173,9 @@ __all__ = [
     "SPFResult",
     "SendEmailRequest",
     "SendResultView",
+    "SendingAccessRequestInput",
+    "SendingAccessRequestView",
+    "SendingAccessView",
     "SendingRampView",
     "StarterTemplateDetailView",
     "StarterTemplateVariableView",
@@ -234,6 +239,7 @@ from e2a.v1.generated.exceptions import ApiException as ApiException
 # import models into sdk package
 from e2a.v1.generated.models.api_key_export_entry import APIKeyExportEntry as APIKeyExportEntry
 from e2a.v1.generated.models.api_key_view import APIKeyView as APIKeyView
+from e2a.v1.generated.models.account_daily_limit import AccountDailyLimit as AccountDailyLimit
 from e2a.v1.generated.models.account_metrics_view import AccountMetricsView as AccountMetricsView
 from e2a.v1.generated.models.account_user_view import AccountUserView as AccountUserView
 from e2a.v1.generated.models.account_view import AccountView as AccountView
@@ -298,6 +304,7 @@ from e2a.v1.generated.models.error_body import ErrorBody as ErrorBody
 from e2a.v1.generated.models.error_envelope import ErrorEnvelope as ErrorEnvelope
 from e2a.v1.generated.models.event_envelope import EventEnvelope as EventEnvelope
 from e2a.v1.generated.models.event_view import EventView as EventView
+from e2a.v1.generated.models.external_sending_not_enabled_details import ExternalSendingNotEnabledDetails as ExternalSendingNotEnabledDetails
 from e2a.v1.generated.models.field_error import FieldError as FieldError
 from e2a.v1.generated.models.forward_request import ForwardRequest as ForwardRequest
 from e2a.v1.generated.models.forward_request_reply_to import ForwardRequestReplyTo as ForwardRequestReplyTo
@@ -365,6 +372,9 @@ from e2a.v1.generated.models.rotate_secret_response import RotateSecretResponse 
 from e2a.v1.generated.models.spf_result import SPFResult as SPFResult
 from e2a.v1.generated.models.send_email_request import SendEmailRequest as SendEmailRequest
 from e2a.v1.generated.models.send_result_view import SendResultView as SendResultView
+from e2a.v1.generated.models.sending_access_request_input import SendingAccessRequestInput as SendingAccessRequestInput
+from e2a.v1.generated.models.sending_access_request_view import SendingAccessRequestView as SendingAccessRequestView
+from e2a.v1.generated.models.sending_access_view import SendingAccessView as SendingAccessView
 from e2a.v1.generated.models.sending_ramp_view import SendingRampView as SendingRampView
 from e2a.v1.generated.models.starter_template_detail_view import StarterTemplateDetailView as StarterTemplateDetailView
 from e2a.v1.generated.models.starter_template_variable_view import StarterTemplateVariableView as StarterTemplateVariableView

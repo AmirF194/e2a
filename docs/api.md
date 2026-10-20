@@ -28,7 +28,7 @@ machine-readable source of truth is **`x-stability-level`** in
 `x-stability-level: beta` may change before it is promoted to stable, and
 **everything not marked beta (or experimental) is GA**, covered by the
 [compatibility rules](#compatibility-rules) below. At the operation level that
-is currently 43 GA operations and 31 beta operations:
+is currently 43 GA operations and 33 beta operations:
 
 | Resource group | Stability | Operations |
 | --- | --- | --- |
@@ -47,6 +47,7 @@ is currently 43 GA operations and 31 beta operations:
 | Agent-scoped suppressions | **beta** | `listAgentSuppressions`, `createAgentSuppression`, `deleteAgentSuppression` |
 | [Message lifecycle diagnostics](#message-lifecycle-diagnostic-contract-beta) | **beta** | `getMessageLifecycle` |
 | Delivery metrics — per agent and account-wide | **beta** | `getAgentMetrics`, `getAccountMetrics` |
+| External sending access requests | **beta** | `getSendingAccessRequest`, `createSendingAccessRequest` |
 
 **Beta fields and capabilities on otherwise-GA operations** (property-level
 `x-stability-level: beta` in the spec — or, where only specific *values* of a
@@ -76,6 +77,11 @@ stable field are beta, `x-experimental-values` on that field):
   `email.bounced`, `email.complained`, `domain.suppression_added`). See
   [Message lifecycle diagnostics](#message-lifecycle-diagnostic-contract-beta)
   and [events.md](events.md#lifecycle-transitions-on-events-beta).
+- **External sending access** — the `sending_access` object on
+  `GET /v1/account` and the `ExternalSendingNotEnabledDetails` shape of the
+  experimental `external_sending_not_enabled` error. The control ships
+  disabled; see the error-code table and
+  [External sending access](#external-sending-access-beta) below.
 - **Account export interior schemas** — `GET /v1/account/export` is a GA
   operation, but its interior record shapes are versioned by the export's
   `schema_version` envelope field rather than the v1 freeze, and are
@@ -85,8 +91,8 @@ stable field are beta, `x-experimental-values` on that field):
 the screening + review-hold event types (`email.flagged`, `email.blocked`,
 `email.review_requested`, `email.review_approved`, `email.review_rejected` —
 marked via `x-experimental-values` on the stable `type` field). The stable
-`error.code` vocabulary likewise marks only `blocked_by_policy` and
-`sending_paused` experimental.
+`error.code` vocabulary likewise marks only `blocked_by_policy`,
+`sending_paused` and `external_sending_not_enabled` experimental.
 See [events.md](events.md).
 
 The exact operation-level list is repeated with methods and paths in
@@ -315,6 +321,9 @@ retryable ones (the per-row retry notes in the table below are authoritative).
 | `forbidden` | 403 | Authenticated but not allowed (key scope, cross-tenant access). |
 | `blocked_by_policy` | 403 | **Experimental.** The outbound message was blocked by the agent's outbound policy gate. |
 | `sending_paused` | 403 | **Experimental.** Outbound sending is paused for the account by the platform abuse controls. Nothing was queued; queued mail is held until an operator resumes. |
+| `external_sending_not_enabled` | 403 | **Experimental.** The account may not send to one or more of the To/Cc/Bcc recipients through its sending identity. Nothing was queued. `error.details` (`ExternalSendingNotEnabledDetails`) lists the allowed destinations and the dashboard recovery URL; retrying the same request will not succeed. |
+| `registration_refused` | 403 | The sign-in identity (login subject or email) belongs to a recently deleted or abuse-closed account and cannot register a new account or restore the old one. Retrying will not succeed; see the privacy policy for the hold periods. |
+| `account_read_only` | 403 | The account is read-only: its sending is paused pending an abuse review, so every write on every surface (REST, dashboard, MCP tools, OAuth consent) is refused. Reads, exports, sign-in/out and moving the account to the trash (`DELETE /v1/account` without `permanent`) keep working. Retrying will not succeed until an operator resumes the account; contact support. `GET /v1/account` reports the state as `read_only: true`. |
 | **Validation** | | |
 | `invalid_request` | 400 / 422 | The canonical input-validation code — malformed (400) or semantically invalid (422). `error.details` carries the per-field list. |
 | `invalid_cursor` | 400 | Bad pagination cursor — drop it and re-fetch from the start. |
@@ -338,6 +347,7 @@ retryable ones (the per-row retry notes in the table below are authoritative).
 | `not_in_trash` | 409 | Restore or permanent-delete was requested for a resource that is not currently in trash. |
 | `purge_in_progress` | 409 | Permanent agent deletion has been claimed and can no longer be reversed; retry deletion to resume it. |
 | `send_in_progress` | 409 | The message send is already executing; wait for its terminal outcome. |
+| `erase_held` | 409 | Permanent deletion (`DELETE /v1/account?permanent=true`, or `DELETE /v1/agents/{email}?permanent=true`) is held while the account's sending is paused. Delete without `permanent` to move it to the trash instead. |
 | `webhook_disabled` | 409 | Operation requires an enabled webhook. |
 | `webhook_cooldown` | 409 | The webhook was auto-disabled and cannot be re-enabled until the cooldown elapses. SDKs do not automatically retry it; retry manually only after the cooldown. |
 | `precondition_failed` | 412 | The resource changed since the supplied `If-Match` value was read. Fetch the latest representation and retry the edit deliberately. |
@@ -409,6 +419,7 @@ every `/v1` operation not listed here is covered by the GA freeze.
 | `approveReview` | `POST /v1/reviews/{id}/approve` | Reviews |
 | `createAgentSuppression` | `POST /v1/agents/{email}/suppressions` | Agent suppressions |
 | `createContact` | `POST /v1/contacts` | Contacts |
+| `createSendingAccessRequest` | `POST /v1/account/sending-access/request` | External sending access |
 | `createTemplate` | `POST /v1/templates` | Templates |
 | `deleteAgentSuppression` | `DELETE /v1/agents/{email}/suppressions/{address}` | Agent suppressions |
 | `deleteContact` | `DELETE /v1/contacts/{address}` | Contacts |
@@ -422,6 +433,7 @@ every `/v1` operation not listed here is covered by the GA freeze.
 | `getEngagement` | `GET /v1/agents/{email}/contacts/{address}` | Contacts |
 | `getMessageLifecycle` | `GET /v1/agents/{email}/messages/{id}/lifecycle` | Message lifecycle |
 | `getReview` | `GET /v1/reviews/{id}` | Reviews |
+| `getSendingAccessRequest` | `GET /v1/account/sending-access/request` | External sending access |
 | `getStarterTemplate` | `GET /v1/starter-templates/{alias}` | Starter templates |
 | `getTemplate` | `GET /v1/templates/{id}` | Templates |
 | `importContacts` | `POST /v1/contacts/import` | Contacts |
@@ -515,8 +527,27 @@ Workspace identity, plan limits, keys, suppressions, and data rights.
 - `GET /v1/account` — whoami: the authenticated principal (user + scope, plus
   `agent_email` for agent-scoped keys), plan caps, and current usage. Works for
   both scopes. (Public *deployment* discovery is the separate `GET /v1/info`.)
-- `DELETE /v1/account?confirm=DELETE` — permanently delete the account and cascade
-  all owned data; returns per-table row counts (GDPR Art. 17). Irreversible.
+- `DELETE /v1/account?confirm=DELETE` — delete the account (GDPR Art. 17). By
+  default the account moves to the trash: it is unusable at once (keys,
+  sessions and OAuth grants revoked, agents trashed, sending stopped, domains
+  unverified), restorable by signing in to the dashboard until `purge_after`,
+  then purged permanently. `permanent=true` erases immediately — except for an
+  account that emailed an external recipient recently (within
+  `trash.recent_sender_erase_defer_days`, 14 days by default): that erase is
+  deferred, the account is moved to the trash like a default delete, and it is
+  purged at `purge_after`, so delivery feedback (spam complaints, bounces)
+  that arrives after a send still reaches it. The deferred case is a normal
+  200 receipt with `mode: "trash"`, `erase_deferred: true`, `purge_after` and
+  a human-readable `message`; the owner can restore until `purge_after`. A
+  paused account still answers `409 erase_held`, which takes precedence. The
+  same rule applies to permanent agent and message deletes (below), so the
+  sent-mail evidence cannot be removed inside the window. A deferred account,
+  agent or message keeps counting toward `usage.storage_bytes` until it is
+  purged, and a deferred agent keeps its address and blocks deleting its
+  domain until then. The
+  receipt carries `mode` (`trash` | `permanent`), `purge_after` (trash only),
+  `erase_deferred` (deferred erase only) and per-table counts. After any deletion the sign-in identity may be held for a
+  period and cannot immediately register a new account (`registration_refused`).
 - `GET /v1/account/export` — self-service account-data export supporting
   access requests: profile, agents, domains, API key metadata, messages,
   usage events, protection events, OAuth connections, and suppressions.
@@ -549,6 +580,9 @@ Workspace identity, plan limits, keys, suppressions, and data rights.
   of sent/inbound messages are inside the exported `raw_message`. A held
   draft's (`pending_review`) staged attachment bytes are internal transient
   storage and are not inlined.
+- `GET /v1/account/sending-access/request`, `POST /v1/account/sending-access/request`
+  (beta) — the account's latest external sending access request, and filing
+  one. See [External sending access](#external-sending-access-beta).
 - `GET/POST /v1/account/api-keys`, `DELETE /v1/account/api-keys/{id}?confirm=DELETE`
   — mint (plaintext shown once), list (metadata only), and revoke API keys.
   Account scope only.
@@ -576,6 +610,46 @@ Cascading deletes may additionally carry receipt counts (all additive):
 /v1/account` returns the full per-table `DeleteUserDataResult` receipt on top
 of `deleted: true`. Domain deletion adds the durable, open-set
 `sending_teardown` state described below.
+
+#### External sending access (beta)
+
+A deployment may restrict which recipients an account can reach through the
+shared sending identity. When it does, `GET /v1/account` carries an additive
+`sending_access` object (absent when the control is disabled or its state is
+unreadable):
+
+| Field | Meaning |
+| --- | --- |
+| `enforcement_applies` | The deployment enforces the restriction for this account (enforce mode, inside the cohort, not a platform account). Stays `true` after approval. |
+| `shared_external_approved` | An operator approved this account. |
+| `paid_external_sending_entitled` | The account holds the billing-issued paid base entitlement. It lifts the restriction only when `available_unlocks` contains `paid_entitlement`; otherwise it is informational. |
+| `owner_recipient_verified` | The account's sign-in email was verified by a trusted login, so it is an allowed destination while restricted. |
+| `available_unlocks` | The routes this deployment accepts for lifting the restriction, as an open set of strings: `operator_approval` (always present — file a request, an operator reviews it, and the account owner is emailed the decision), `verified_domain` (sending as the account's own verified custom domain), `paid_entitlement` (a paid base plan). Servers that predate the field omit it and accept all three. |
+
+A restricted account can always send to agent inboxes in the same account and
+to its verified account email. Any other To/Cc/Bcc recipient refuses the whole
+send with `403 external_sending_not_enabled`. To lift the restriction:
+
+```json
+POST /v1/account/sending-access/request
+{"use_case": "Order confirmations for customers who signed up on example.com",
+ "recipients": "Our own signed-up customers",
+ "expected_daily_volume": 200}
+```
+
+File **one** request. While it is pending, resubmitting returns the same
+request (`200`); after a decline a new request may be filed, up to 3 per 30
+days (`429 rate_limited` beyond that — do not retry). An account that is not
+currently restricted (already approved, outside the cohort, shadow mode, or
+lifted by an available unlock) gets `409 conflict` and nothing is filed.
+Request text may contain line breaks and tabs but no other control characters,
+Unicode line separators, or bidi override/isolate controls
+(`400 invalid_request`). The decision is emailed
+to the account owner; `GET /v1/account/sending-access/request` shows its
+`state` (`pending`, `approved`, `declined`; open set). The self-host default
+accepts all three unlocks; the hosted e2a service accepts only
+`operator_approval`. The MCP server exposes the same two operations as the
+`request_sending_access` and `get_sending_access_request` tools.
 
 ### Domains (`/v1/domains`)
 
@@ -634,13 +708,15 @@ usually a truncated TXT.)
 
 Every domain response also carries **`sending_ramp`** — the platform-managed
 recipient-volume ramp state for newly verified custom sender domains:
-`status` (open set; known values `inactive | ramping | complete | exempt`),
-`daily_recipient_limit` (zero means no cap applies), `recipients_used_today`,
+`status` (open set; known values `inactive | ramping | complete | exempt | account_managed`),
+`daily_recipient_limit` (zero means no per-domain cap applies), `recipients_used_today`,
 `active_days` / `ramp_days`, and `resets_at` / `estimated_completion_at`. You
 can read this state but cannot change the schedule, exempt yourself, or reset
 progression through the API — see
 [`docs/runbooks/sending-ramp.md`](runbooks/sending-ramp.md) for the
-operator-side mechanics.
+operator-side mechanics. With `account_managed`, the optional `daily_limit`
+object on `GET /v1/account` supplies the account-wide external allowance,
+reserved usage, shared-identity subset, and UTC reset time.
 
 ### Agents (`/v1/agents`)
 
@@ -655,7 +731,12 @@ or on the deployment's shared domain (see `GET /v1/info`).
   review queue. Restore it via `POST /v1/agents/{email}/restore` within the trash
   retention window (30 days by default, deployment-configurable), after which
   it's purged permanently. Pass `?permanent=true` to skip the trash and delete
-  irreversibly right away (accepts live and trashed agents).
+  irreversibly right away (accepts live and trashed agents; `409 erase_held`
+  while the account's sending is paused). An agent that emailed an external
+  recipient within `trash.recent_sender_erase_defer_days` (14 days by default)
+  is not purged on demand: it is moved to the trash (or stays there) and the
+  200 receipt adds `erase_deferred: true`, `purge_after` and a `message`; it
+  can be restored until `purge_after`.
 - `POST /v1/agents/{email}/restore` — bring a trashed agent back into service,
   messages and configuration intact. For drafts still held for review,
   `approval_expires_at` is shifted forward by the time the agent spent in trash
@@ -766,6 +847,12 @@ declared stable.
   deployment-configurable).
   Ordinary message lists, conversations, reply targets, and forward targets hide
   trashed messages; use `GET …/messages?deleted=true` to enumerate the trash.
+- `DELETE …/messages/{id}` — move a message to the trash (no confirmation).
+  `?permanent=true&confirm=DELETE` deletes an already-trashed message forever —
+  except a message sent to an external recipient within
+  `trash.recent_sender_erase_defer_days` (14 days by default), which stays in
+  the trash; the 200 receipt then adds `erase_deferred: true`, `purge_after`
+  and a `message`.
 - `POST …/messages/{id}/restore` — bring a trashed message back into the inbox.
   Restored message data is retained indefinitely unless deleted again. `409
   not_in_trash` if the message isn't in the trash.
@@ -867,6 +954,7 @@ retryability; clients must not reinterpret those fields independently:
 | `submission.cancelled` | `submission` | `failed` | false |
 | `submission.policy_budget_expired` | `submission` | `failed` | true |
 | `submission.sending_setup_expired` | `submission` | `failed` | true |
+| `submission.external_sending_not_enabled` | `submission` | `failed` | false |
 | `delivery.recipient_server_accepted` | `delivery` | `delivered` | false |
 | `delivery.temporary_delay` | `delivery` | `deferred` | true |
 | `delivery.permanent_bounce` | `delivery` | `bounced` | false |

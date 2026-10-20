@@ -1,8 +1,19 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
+import useSWR from "swr";
 import { useAuth } from "../../components/AuthProvider";
 import { PageShell } from "../../components/loft/PageShell";
+import { useSendingAccess } from "../../components/hooks/useSendingAccess";
+import {
+  getSendingAccessRequest,
+  type SendingAccessRequest,
+} from "../../components/onboarding/api";
+import { formatLongDate, readApiError } from "../../../lib/accountDeletion";
+import { hardNavigate } from "../../../lib/navigation";
+import { sendingAccessRequestKey } from "../../../lib/swrKeys";
+import { sendingAccessSettingsSummary } from "../../../lib/sendingAccess";
 
 export default function SettingsPage() {
   const { user } = useAuth();
@@ -194,9 +205,48 @@ function ProfileSection({
           </dd>
           <dt style={{ color: "var(--fg-muted)" }}>Member since</dt>
           <dd style={{ color: "var(--fg)" }}>{formatDate(user.created_at)}</dd>
+          <SendingAccessRow />
         </dl>
       </div>
     </section>
+  );
+}
+
+// Beta: the external sending access restriction (see /sending-access — the
+// dashboard notice and a blocked send's recovery_url both point there, but
+// once an account is approved that banner disappears, and a declined
+// account has no other way back to it). `status` is undefined outright on a
+// deployment with the feature disabled, in which case there is nothing to
+// show — this renders no row at all rather than a "not restricted" line, so
+// self-host Settings pages don't gain a permanent no-op fact.
+function SendingAccessRow() {
+  const { status, isLoading: statusLoading } = useSendingAccess();
+  const { data: request, isLoading: requestLoading } = useSWR<SendingAccessRequest | null>(
+    sendingAccessRequestKey,
+    getSendingAccessRequest,
+  );
+
+  // Wait for both reads to settle so a restricted account never flashes a
+  // bare "Restricted" before its request state (pending vs. declined) is
+  // known, and so an SWR error on either read (network blip) just leaves the
+  // row absent instead of showing stale or wrong copy.
+  if (statusLoading || requestLoading) return null;
+  const summary = sendingAccessSettingsSummary(status, request);
+  if (!summary) return null;
+
+  return (
+    <>
+      <dt style={{ color: "var(--fg-muted)" }}>External sending</dt>
+      <dd style={{ color: "var(--fg)" }}>
+        <Link
+          href="/sending-access"
+          className="underline font-medium"
+          style={{ color: "var(--accent-strong)" }}
+        >
+          {summary}
+        </Link>
+      </dd>
+    </>
   );
 }
 
@@ -237,37 +287,83 @@ function ExportSection() {
   );
 }
 
-type DeleteState = "idle" | "deleting" | "error";
+type DeleteState = "idle" | "deleting" | "error" | "deferred";
+type DeleteMode = "trash" | "permanent";
 
+// Delete account. DELETE /v1/account?confirm=DELETE moves the account to the
+// trash (restorable by signing in again for the trash window); adding
+// permanent=true erases it immediately. Erasing is a separate choice with its
+// own acknowledgement, never the default. A permanent erase of an account that
+// emailed external recipients recently comes back as a trash receipt with
+// erase_deferred: the account is deleted but kept in the trash until
+// purge_after, so we say so (and when) before leaving the page.
 function DangerZone() {
   const [open, setOpen] = useState(false);
   const [confirmText, setConfirmText] = useState("");
+  const [mode, setMode] = useState<DeleteMode>("trash");
+  const [acknowledged, setAcknowledged] = useState(false);
   const [state, setState] = useState<DeleteState>("idle");
   const [errorMessage, setErrorMessage] = useState("");
+  const [deferredUntil, setDeferredUntil] = useState("");
 
-  const ready = confirmText === "DELETE";
+  const permanent = mode === "permanent";
+  const ready = confirmText === "DELETE" && (!permanent || acknowledged);
+
+  const reset = () => {
+    setOpen(false);
+    setConfirmText("");
+    setMode("trash");
+    setAcknowledged(false);
+    setState("idle");
+    setErrorMessage("");
+  };
 
   const handleDelete = async () => {
     if (!ready) return;
     setState("deleting");
     setErrorMessage("");
+    const url = permanent
+      ? "/v1/account?confirm=DELETE&permanent=true"
+      : "/v1/account?confirm=DELETE";
     try {
-      const res = await fetch("/v1/account?confirm=DELETE", {
+      const res = await fetch(url, {
         method: "DELETE",
         credentials: "include",
       });
       if (!res.ok) {
-        const text = await res.text().catch(() => `HTTP ${res.status}`);
+        const err = await readApiError(res);
         setState("error");
-        setErrorMessage(text.trim());
+        if (err.code === "erase_held") {
+          setErrorMessage(
+            "Sending is paused on this account, so it can't be erased permanently right now. Choose “Move to trash” instead — the account is deleted permanently when the trash window ends.",
+          );
+        } else if (err.code === "rate_limited" || res.status === 429) {
+          setErrorMessage("Too many requests. Wait a few minutes and try again.");
+        } else {
+          setErrorMessage(err.message || `HTTP ${res.status}`);
+        }
         return;
       }
-      window.location.href = "/?account_deleted=1";
+      const receipt = (await res.json().catch(() => null)) as {
+        erase_deferred?: boolean;
+        purge_after?: string;
+      } | null;
+      if (receipt?.erase_deferred) {
+        setDeferredUntil(formatLongDate(receipt.purge_after));
+        setState("deferred");
+        return;
+      }
+      // Every session is revoked server-side; a full navigation makes the
+      // site re-read that and land signed out.
+      hardNavigate("/?account_deleted=1");
     } catch (err) {
       setState("error");
       setErrorMessage(err instanceof Error ? err.message : String(err));
     }
   };
+
+  const busy = state === "deleting";
+  const radioLabel = "flex items-start gap-3 p-3 cursor-pointer";
 
   return (
     <section>
@@ -287,16 +383,65 @@ function DangerZone() {
           Delete account
         </h3>
         <p
-          className="mb-4 max-w-2xl text-[13px] leading-[1.6]"
+          className="max-w-2xl text-[13px] leading-[1.6]"
           style={{ color: "var(--fg-muted)" }}
         >
-          Permanently delete your account along with all your inboxes, domains,
-          messages, API keys, and sessions, in a single Postgres transaction.{" "}
-          <strong style={{ color: "var(--fg)" }}>This is irreversible.</strong>{" "}
-          Right of deletion — GDPR Article 17 / CCPA &quot;Do Not Sell or
-          Share&quot;.
+          Deleting moves your account to the trash. To restore it, sign in
+          again before the trash window ends (30 days by default). Right of
+          deletion — GDPR Article 17 / CCPA equivalent.
         </p>
-        {!open ? (
+        <ul
+          className="mt-3 mb-4 max-w-2xl list-disc pl-5 space-y-1 text-[13px] leading-[1.6]"
+          style={{ color: "var(--fg-muted)" }}
+        >
+          <li>
+            Every API key, connected app, and dashboard session is revoked
+            right away. Restoring doesn&apos;t bring them back.
+          </li>
+          <li>Your inboxes move to the trash and stop sending.</li>
+          <li>
+            Custom domains are unverified. You&apos;ll re-verify them after
+            restoring.
+          </li>
+          <li>
+            When the trash window ends, everything is erased for good. The
+            identity you signed in with may then be held for a while and
+            can&apos;t register a new account until it&apos;s released.
+          </li>
+        </ul>
+        {state === "deferred" ? (
+          <div
+            role="status"
+            className="max-w-2xl p-4 space-y-3 text-[13px] leading-[1.6]"
+            style={{
+              background: "var(--bg-elev)",
+              border: "1px solid var(--border)",
+              borderRadius: "var(--r-md)",
+              color: "var(--fg)",
+            }}
+          >
+            <p className="font-medium">Your account was deleted and moved to the trash.</p>
+            <p style={{ color: "var(--fg-muted)" }}>
+              It emailed people outside e2a recently, so it isn&apos;t erased
+              right away: it stays in the trash
+              {deferredUntil ? <> until {deferredUntil}</> : <> until the trash window ends</>}
+              , then it&apos;s erased permanently. To restore it, sign in again
+              before then.
+            </p>
+            <button
+              onClick={() => hardNavigate("/?account_deleted=1")}
+              className="px-4 py-2 text-[13px] font-medium transition"
+              style={{
+                background: "var(--bg-panel)",
+                color: "var(--fg)",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--r-md)",
+              }}
+            >
+              Continue
+            </button>
+          </div>
+        ) : !open ? (
           <button
             onClick={() => setOpen(true)}
             className="px-4 py-2 text-[13px] font-medium transition"
@@ -310,7 +455,86 @@ function DangerZone() {
             Delete account…
           </button>
         ) : (
-          <div className="space-y-3">
+          <div className="space-y-4">
+            <fieldset className="max-w-2xl" disabled={busy}>
+              <legend className="text-[13px] font-medium mb-2" style={{ color: "var(--fg)" }}>
+                How to delete
+              </legend>
+              <div
+                className="overflow-hidden"
+                style={{ border: "1px solid var(--border)", borderRadius: "var(--r-md)" }}
+              >
+                <label
+                  className={radioLabel}
+                  style={{ background: mode === "trash" ? "var(--bg-elev)" : "transparent" }}
+                >
+                  <input
+                    type="radio"
+                    name="delete-mode"
+                    value="trash"
+                    checked={mode === "trash"}
+                    onChange={() => {
+                      setMode("trash");
+                      setAcknowledged(false);
+                    }}
+                    className="mt-0.5"
+                    style={{ accentColor: "var(--accent-fill)" }}
+                  />
+                  <span className="text-[13px] leading-[1.5]">
+                    <span className="block font-medium" style={{ color: "var(--fg)" }}>
+                      Move to trash
+                    </span>
+                    <span style={{ color: "var(--fg-muted)" }}>
+                      Restorable by signing in again until the trash window ends.
+                    </span>
+                  </span>
+                </label>
+                <label
+                  className={radioLabel}
+                  style={{
+                    borderTop: "1px solid var(--border)",
+                    background: permanent ? "var(--danger-bg)" : "transparent",
+                  }}
+                >
+                  <input
+                    type="radio"
+                    name="delete-mode"
+                    value="permanent"
+                    checked={permanent}
+                    onChange={() => setMode("permanent")}
+                    className="mt-0.5"
+                    style={{ accentColor: "var(--accent-fill)" }}
+                  />
+                  <span className="text-[13px] leading-[1.5]">
+                    <span className="block font-medium" style={{ color: "var(--danger-strong)" }}>
+                      Erase permanently now
+                    </span>
+                    <span style={{ color: "var(--fg-muted)" }}>
+                      Skips the trash. Nothing can be restored. If this account
+                      emailed people outside e2a recently, it&apos;s kept in the
+                      trash until the window ends instead.
+                    </span>
+                  </span>
+                </label>
+              </div>
+            </fieldset>
+            {permanent && (
+              <label className="flex items-start gap-3 max-w-2xl cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={acknowledged}
+                  onChange={(e) => setAcknowledged(e.target.checked)}
+                  disabled={busy}
+                  className="mt-0.5"
+                  style={{ accentColor: "var(--danger)" }}
+                />
+                <span className="text-[13px] leading-[1.5]" style={{ color: "var(--fg)" }}>
+                  I understand my inboxes, messages, and domains are erased
+                  immediately and can&apos;t be recovered, and that this sign-in
+                  may be unable to register a new account for a while.
+                </span>
+              </label>
+            )}
             <label className="block">
               <span className="text-[13px]" style={{ color: "var(--fg)" }}>
                 Type{" "}
@@ -332,7 +556,9 @@ function DangerZone() {
                 type="text"
                 value={confirmText}
                 onChange={(e) => setConfirmText(e.target.value)}
+                disabled={busy}
                 placeholder="DELETE"
+                autoComplete="off"
                 className="mt-1 w-full max-w-xs px-3 py-2 text-[13px] font-mono"
                 style={{
                   background: "var(--bg-panel)",
@@ -344,16 +570,17 @@ function DangerZone() {
             </label>
             {state === "error" && (
               <p
+                role="alert"
                 className="text-[13px]"
                 style={{ color: "var(--danger-strong)" }}
               >
-                Failed: {errorMessage || "unknown error"}
+                Deleting didn&apos;t finish: {errorMessage || "unknown error"}
               </p>
             )}
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2">
               <button
                 onClick={handleDelete}
-                disabled={!ready || state === "deleting"}
+                disabled={!ready || busy}
                 className="px-4 py-2 text-[13px] font-medium transition disabled:opacity-50 disabled:cursor-not-allowed"
                 style={{
                   background: "var(--danger)",
@@ -361,16 +588,17 @@ function DangerZone() {
                   borderRadius: "var(--r-md)",
                 }}
               >
-                {state === "deleting" ? "Deleting…" : "Delete my account"}
+                {busy
+                  ? permanent
+                    ? "Erasing…"
+                    : "Deleting…"
+                  : permanent
+                    ? "Erase my account permanently"
+                    : "Delete my account"}
               </button>
               <button
-                onClick={() => {
-                  setOpen(false);
-                  setConfirmText("");
-                  setState("idle");
-                  setErrorMessage("");
-                }}
-                disabled={state === "deleting"}
+                onClick={reset}
+                disabled={busy}
                 className="px-4 py-2 text-[13px] transition"
                 style={{
                   background: "var(--bg-panel)",

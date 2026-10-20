@@ -12,6 +12,14 @@
  *     account, seeded already over its plan caps. The scenario proving the
  *     402 envelope's `current` field runs as that account and skips without
  *     it (a deployed staging target has no over-cap account to offer).
+ *   E2A_TEST_DISPOSABLE_{TRASH,ERASE}_API_KEY: optional; the contract server's
+ *     throwaway accounts the account-deletion scenarios delete (skip if unset).
+ *   E2A_TEST_RESTRICTED_API_KEY: optional; key for the contract server's
+ *     fourth account, the ONLY one inside the external-sending-access
+ *     enforcement cohort (a far-future cohort cutoff keeps every other
+ *     account, including the primary, outside it). Scenarios asserting
+ *     external_sending_not_enabled enforcement run as that account and skip
+ *     without it (a deployed staging target has no such account to offer).
  *
  * The runner drives the server over raw HTTP (a thin scenario interpreter,
  * not the ergonomic client) plus {@link WSListener} for WebSocket steps.
@@ -46,6 +54,26 @@ const CAPPED_API_KEY = process.env.E2A_TEST_CAPPED_API_KEY;
 // the runner is pointed at a deployed server, which has no such account.
 const OVERCAP_API_KEY = process.env.E2A_TEST_OVERCAP_API_KEY;
 
+// The contract server's restricted-account key (see the header) — the only
+// account inside the external-sending-access enforcement cohort. Absent when
+// the runner is pointed at a deployed server, which has no such account.
+const RESTRICTED_API_KEY = process.env.E2A_TEST_RESTRICTED_API_KEY;
+// The contract server's two throwaway accounts that exist only to be deleted
+// by the account-deletion scenarios (once each per server). Absent against a
+// deployed server — those scenarios then skip.
+const DISPOSABLE_TRASH_API_KEY = process.env.E2A_TEST_DISPOSABLE_TRASH_API_KEY;
+const DISPOSABLE_ERASE_API_KEY = process.env.E2A_TEST_DISPOSABLE_ERASE_API_KEY;
+// The contract server's throwaway account seeded with a recent external send,
+// whose permanent erase is deferred to the trash (once per server).
+const DISPOSABLE_DEFERRED_ERASE_API_KEY = process.env.E2A_TEST_DISPOSABLE_DEFERRED_ERASE_API_KEY;
+// The contract server's account whose agent/message permanent deletes are
+// deferred (the scenario restores both, so it is re-runnable).
+const DEFERRED_PURGE_API_KEY = process.env.E2A_TEST_DEFERRED_PURGE_API_KEY;
+// The contract server's abuse-paused (read-only) account; its scenario trashes
+// it at the end (once per server). Absent against a deployed server — the
+// scenario then skips.
+const READONLY_API_KEY = process.env.E2A_TEST_READONLY_API_KEY;
+
 /**
  * True when the scenario authenticates as `placeholder`'s account anywhere.
  *
@@ -70,6 +98,30 @@ function scenarioNeedsCappedAccount(sc: Scenario): boolean {
 
 function scenarioNeedsOverCapAccount(sc: Scenario): boolean {
   return scenarioUsesPlaceholder(sc, "{overcap_api_key}");
+}
+
+function scenarioNeedsRestrictedAccount(sc: Scenario): boolean {
+  return scenarioUsesPlaceholder(sc, "{restricted_api_key}");
+}
+
+function scenarioNeedsDisposableTrashAccount(sc: Scenario): boolean {
+  return scenarioUsesPlaceholder(sc, "{disposable_trash_api_key}");
+}
+
+function scenarioNeedsDisposableEraseAccount(sc: Scenario): boolean {
+  return scenarioUsesPlaceholder(sc, "{disposable_erase_api_key}");
+}
+
+function scenarioNeedsDisposableDeferredEraseAccount(sc: Scenario): boolean {
+  return scenarioUsesPlaceholder(sc, "{disposable_deferred_erase_api_key}");
+}
+
+function scenarioNeedsDeferredPurgeAccount(sc: Scenario): boolean {
+  return scenarioUsesPlaceholder(sc, "{deferred_purge_api_key}");
+}
+
+function scenarioNeedsReadOnlyAccount(sc: Scenario): boolean {
+  return scenarioUsesPlaceholder(sc, "{readonly_api_key}");
 }
 
 it("parses the generated message lifecycle page contract", () => {
@@ -202,13 +254,57 @@ it("keeps the account-limits scenario pinned to both directions of enforcement",
   ]);
 });
 
+// Always-on: the live run skips without a restricted-account key (deployed
+// targets have no account inside the enforcement cohort), so this shape test
+// is what keeps that skip from decaying into zero coverage. It fails if the
+// scenario is deleted, stops using the restricted account, or loses either
+// direction of enforcement (refused for an external recipient, allowed for an
+// in-account one).
+it("keeps the external-sending-access scenario pinned to both directions of enforcement", () => {
+  const scenario = loadScenarios().find(
+    (c) => c.name === "external_sending_access_restricted_account",
+  );
+  expect(scenario).toBeDefined();
+  expect(scenarioNeedsRestrictedAccount(scenario!)).toBe(true);
+
+  const steps = new Map(scenario!.steps.map((step) => [step.id, step]));
+
+  // Refused for an external To/Cc/Bcc, with the machine-readable code an SDK
+  // branches on.
+  for (const id of [
+    "external_to_is_refused",
+    "keyed_refusal_is_not_replayed_as_success",
+    "hidden_bcc_refuses_the_whole_send",
+    "external_cc_refuses_the_whole_send",
+  ]) {
+    expect(steps.get(id)?.expect).toMatchObject({
+      status: 403,
+      body_match: { "error.code": "external_sending_not_enabled" },
+    });
+  }
+
+  // ...and allowed when the recipient is a live agent in the same account.
+  // Without this, a server that refused unconditionally would satisfy every
+  // assertion above.
+  expect(steps.get("same_account_agent_is_allowed")?.expect).toMatchObject({
+    status: 202,
+    body_match: { status: "accepted" },
+  });
+
+  // The primary account (outside the cohort) must stay unaffected.
+  expect(steps.get("primary_account_is_outside_the_cohort")?.expect).toMatchObject({
+    status: 200,
+    body_match: { "sending_access.enforcement_applies": false },
+  });
+});
+
 it("keeps the scheduled-send scenario self-cleaning and projection-complete", () => {
   const scenario = loadScenarios().find(
     (candidate) => candidate.name === "scheduled_send_fields",
   );
   expect(scenario).toBeDefined();
   expect(scenario!.setup?.[0]?.register_agent?.email).toBe(
-    "scheduled-contract-{scenario_token}@agents.e2a.dev",
+    "scheduled-contract-{scenario_token}@agents.localhost",
   );
 
   const steps = new Map(scenario!.steps.map((step) => [step.id, step]));
@@ -848,6 +944,14 @@ class Runner {
     // silently-empty bearer token can never reach the wire as a confusing 401.
     if (CAPPED_API_KEY) this.vars.capped_api_key = CAPPED_API_KEY;
     if (OVERCAP_API_KEY) this.vars.overcap_api_key = OVERCAP_API_KEY;
+    if (RESTRICTED_API_KEY) this.vars.restricted_api_key = RESTRICTED_API_KEY;
+    if (DISPOSABLE_TRASH_API_KEY) this.vars.disposable_trash_api_key = DISPOSABLE_TRASH_API_KEY;
+    if (DISPOSABLE_ERASE_API_KEY) this.vars.disposable_erase_api_key = DISPOSABLE_ERASE_API_KEY;
+    if (DISPOSABLE_DEFERRED_ERASE_API_KEY) {
+      this.vars.disposable_deferred_erase_api_key = DISPOSABLE_DEFERRED_ERASE_API_KEY;
+    }
+    if (DEFERRED_PURGE_API_KEY) this.vars.deferred_purge_api_key = DEFERRED_PURGE_API_KEY;
+    if (READONLY_API_KEY) this.vars.readonly_api_key = READONLY_API_KEY;
     this.api = new RawApi(apiKey, baseUrl);
     this.seeder = SEED ? new Seeder(baseUrl, apiKey) : null;
   }
@@ -1266,16 +1370,28 @@ describe.skipIf(!baseUrl || !apiKey)("Contract scenarios", () => {
   for (const sc of scenarios) {
     // Store-dependent scenarios run when SEED supplies their preconditions over
     // the API; otherwise they skip. Account-global scenarios skip regardless.
-    // Quota scenarios need the capped or over-cap account; without its key
-    // there is no way to reach a cap on a live server, so they skip. The Go
-    // runner owns the contract server in-process and always has it, and the
-    // always-on shape test below fails if the scenario is ever deleted or
-    // defanged, so a skip here can never quietly become zero coverage.
+    // Quota scenarios need the capped or over-cap account, and external-sending-
+    // access enforcement scenarios need the restricted account; without the
+    // matching key there is no way to reach that state on a live server, so
+    // they skip. The Go runner owns the contract server in-process and always
+    // has every account, and the always-on shape tests below fail if a
+    // scenario is ever deleted or defanged, so a skip here can never quietly
+    // become zero coverage.
     const skip =
       ACCOUNT_GLOBAL.has(sc.name) ||
       (scenarioNeedsStore(sc) && !SEED) ||
       (scenarioNeedsCappedAccount(sc) && !CAPPED_API_KEY) ||
-      (scenarioNeedsOverCapAccount(sc) && !OVERCAP_API_KEY);
+      (scenarioNeedsOverCapAccount(sc) && !OVERCAP_API_KEY) ||
+      (scenarioNeedsRestrictedAccount(sc) && !RESTRICTED_API_KEY) ||
+      // Account-deletion scenarios destroy their account; they run only
+      // against the contract server's seeded disposable accounts.
+      (scenarioNeedsDisposableTrashAccount(sc) && !DISPOSABLE_TRASH_API_KEY) ||
+      (scenarioNeedsDisposableEraseAccount(sc) && !DISPOSABLE_ERASE_API_KEY) ||
+      (scenarioNeedsDisposableDeferredEraseAccount(sc) && !DISPOSABLE_DEFERRED_ERASE_API_KEY) ||
+      (scenarioNeedsDeferredPurgeAccount(sc) && !DEFERRED_PURGE_API_KEY) ||
+      // The read-only scenario runs only against the contract server's seeded
+      // abuse-paused account (and trashes it).
+      (scenarioNeedsReadOnlyAccount(sc) && !READONLY_API_KEY);
 
     (skip ? it.skip : it)(
       sc.name,

@@ -121,15 +121,17 @@ Hosts that support OAuth connectors can instead add `https://api.e2a.dev/mcp` as
 
 ## Tools
 
-The server exposes up to **78** tools spanning agents, messages, human-in-the-loop
+The server exposes up to **80** tools spanning agents, messages, human-in-the-loop
 approval, attachments, domains, events, webhooks, API keys, contacts/outreach,
-email templates (beta), and suppressions.
+email templates (beta), suppressions, and external sending access requests
+(beta).
 **The visible set depends on your credential's scope:** an **agent**-scoped
 credential sees the 21 runtime/inbox tools (read, send, reply, restore
 messages, per-agent outreach); an **account**-scoped credential also sees the
-57 admin/setup tools (agent/domain/webhook/event/template/API-key/contact/
-suppression management — **and HITL review discovery plus approve/reject, which
-is an account-owner action, never agent self-approval**) — all 78.
+59 admin/setup tools (agent/domain/webhook/event/template/API-key/contact/
+suppression/sending-access management — **and HITL review discovery plus
+approve/reject, which is an account-owner action, never agent
+self-approval**) — all 80.
 Every tool carries MCP annotations (`readOnlyHint`/`destructiveHint`/
 `idempotentHint`) so hosts can auto-approve reads and flag destructive actions.
 The tables below highlight the most commonly used ones — your MCP host's tool list
@@ -139,7 +141,7 @@ shows the set your scope allows, with per-tool descriptions.
 
 | Tool | Description |
 | --- | --- |
-| `whoami` | Get the authenticated account's identity — user, scope, plan/limits; for an agent-scoped credential, also the bound agent address. |
+| `whoami` | Get the authenticated account's identity — user, scope, plan/limits; for an agent-scoped credential, also the bound agent address. On a deployment that reports it, also includes the additive beta `sending_access` object (see External sending access below). |
 | `list_agents` | List agent inboxes; pass `deleted:true` to list the 30-day trash. (Admin/account-scoped.) |
 | `get_agent` | Get one agent inbox by its full email address. |
 | `create_agent` | Register a new agent by its full email address — on a verified domain you own, or the deployment's shared domain. No delivery "mode": inbound is always available via `list_messages` (poll) or a `create_webhook` subscription. (Admin/account-scoped.) |
@@ -158,6 +160,31 @@ shows the set your scope allows, with per-tool descriptions.
 
 Scheduled sending via `send_at` / `scheduled_at` is **beta and may change
 before it is declared stable**.
+
+> **External sending access (beta).** On a deployment that restricts it, an
+> account may be limited to sending through the shared identity only to its
+> verified account email and to agent inboxes in the same account. A
+> `send_message` / `reply_to_message` / `forward_message` (or the deprecated
+> `send_email`) call with any other To/Cc/Bcc recipient refuses the WHOLE
+> send with `external_sending_not_enabled` (403) — nothing is queued, and the
+> identical call will not succeed on retry. `whoami`'s `sending_access` object
+> reports the current state (`enforcement_applies`, `shared_external_approved`,
+> `paid_external_sending_entitled`, `owner_recipient_verified`) and
+> `available_unlocks` — what can lift the restriction on this deployment:
+> `operator_approval` always; `verified_domain` (send from your own verified
+> domain) and `paid_entitlement` (a paid plan) only where listed. The hosted
+> service lists only `operator_approval`. To ask for approval, call
+> `request_sending_access` **once** (account scope; also available in the
+> dashboard at the error's `recovery_url`): resubmitting while a request is
+> pending returns the same request, and `rate_limited` (3 requests per 30 days)
+> must not be retried. An operator decides and the decision is **emailed to the
+> account owner**; `get_sending_access_request` shows the current state. No MCP
+> tool can grant approval.
+>
+> | Tool | Description |
+> | --- | --- |
+> | `request_sending_access` | Beta. File one request for an operator to review external sending access (`use_case`, `recipients`, `expected_daily_volume`). Mutating: refused with `account_read_only` on a frozen account. (Admin/account-scoped.) |
+> | `get_sending_access_request` | Beta. The account's latest request and its `state` (`pending` / `approved` / `declined`). Read-only. (Admin/account-scoped.) |
 
 | Tool | Description |
 | --- | --- |

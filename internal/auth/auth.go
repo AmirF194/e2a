@@ -38,8 +38,14 @@ func writeJSON(w http.ResponseWriter, payload any) {
 
 const (
 	SessionCookieName = "e2a_session"
-	StateCookieName   = "e2a_oauth_state"
-	SessionMaxAge     = 7 * 24 * time.Hour
+	// RestoreSessionCookieName carries the RESTRICTED session a sign-in gets
+	// when it resolves to a trashed account. It is a different cookie on
+	// purpose: nothing that reads e2a_session (the dashboard, the billing
+	// sidecar) can ever mistake it for a full session. Only the three
+	// /api/account/{deletion,restore,erase} routes read it.
+	RestoreSessionCookieName = "e2a_restore_session"
+	StateCookieName          = "e2a_oauth_state"
+	SessionMaxAge            = 7 * 24 * time.Hour
 )
 
 const defaultUserInfoURL = "https://openidconnect.googleapis.com/v1/userinfo"
@@ -476,8 +482,31 @@ func (ua *UserAuth) HandleCallback(w http.ResponseWriter, r *http.Request) {
 
 	user, err := ua.store.CreateOrGetUser(ctx, userInfo.Email, userInfo.Name, userInfo.Sub)
 	if err != nil {
+		if code, ok := accountUnavailableCode(err); ok {
+			http.Redirect(w, r, ua.baseURL+AccountUnavailablePath+"?code="+code, http.StatusFound)
+			return
+		}
 		http.Error(w, "failed to create user", http.StatusInternalServerError)
 		return
+	}
+	// A sign-in that resolves to a TRASHED account gets only the restricted
+	// session behind the restore interstitial — never an ordinary session, a
+	// CLI key hand-off, or an owner-proof write.
+	if user.DeletedAt != nil {
+		if !issueRestrictedSession(ctx, w, r, ua.store, user, ua.baseURL, ua.secure) {
+			return
+		}
+		return
+	}
+
+	// Owner-mailbox proof for external sending access. Recorded only here —
+	// after the state/nonce check, the code exchange, the provider userinfo
+	// fetch with that token, the email_verified assertion, and the subject
+	// binding above. Best effort: a failed proof write must not fail the
+	// login; the account simply keeps no owner-mailbox exception until the
+	// next verified login.
+	if _, perr := ua.store.RecordGoogleOwnerEmailProof(ctx, user.ID, userInfo.Sub, userInfo.Email); perr != nil {
+		log.Printf("[auth] record owner email proof failed: user=%s err=%v", user.ID, perr)
 	}
 
 	sessionToken, err := ua.store.CreateUserSession(ctx, user.ID)
@@ -579,6 +608,16 @@ func (ua *UserAuth) isSameOriginLogoutRequest(r *http.Request) bool {
 	if expected == "" {
 		expected = normalizeHTTPOrigin(ua.baseURL)
 	}
+	return IsSameOriginRequest(r, expected)
+}
+
+// IsSameOriginRequest reports whether a browser request provably comes from
+// expectedOrigin (scheme://host[:port]): Origin is preferred, Referer is the
+// fallback for browsers that omit Origin on form posts, and an absent or
+// unparsable provenance fails closed. Cookie-authenticated state-changing
+// dashboard routes use it as their CSRF check on top of SameSite=Lax.
+func IsSameOriginRequest(r *http.Request, expectedOrigin string) bool {
+	expected := normalizeHTTPOrigin(expectedOrigin)
 	if expected == "" {
 		return false
 	}
@@ -729,8 +768,22 @@ func (ua *UserAuth) HandleUpdateMe(w http.ResponseWriter, r *http.Request) {
 	ua.writeMe(w, updated)
 }
 
+// sessionUserKey carries a session user already resolved for this request
+// (WithSessionUser), so a guard and the handler behind it share one lookup.
+type sessionUserKey struct{}
+
+// WithSessionUser returns r carrying user as the session user that
+// AuthenticateRequest resolved for it. Only pass the result of
+// AuthenticateRequest on this same request.
+func WithSessionUser(r *http.Request, user *identity.User) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), sessionUserKey{}, user))
+}
+
 // AuthenticateRequest extracts the user from the session cookie. Returns nil if not authenticated.
 func (ua *UserAuth) AuthenticateRequest(r *http.Request) *identity.User {
+	if u, ok := r.Context().Value(sessionUserKey{}).(*identity.User); ok && u != nil {
+		return u
+	}
 	cookie, err := r.Cookie(SessionCookieName)
 	if err != nil {
 		return nil
@@ -1146,4 +1199,56 @@ func (ua *UserAuth) HandleDeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusOK)
+}
+
+// Account-trash landing pages (web/src/app/account/...). The Google and OIDC
+// callbacks are browser redirects, so their account-state outcomes land on a
+// page carrying the machine code rather than a JSON envelope.
+const (
+	AccountRestorePath     = "/account/restore"
+	AccountUnavailablePath = "/account/unavailable"
+)
+
+// accountUnavailableCode maps a signup/sign-in refusal to the code the
+// unavailable page renders.
+func accountUnavailableCode(err error) (string, bool) {
+	switch {
+	case errors.Is(err, identity.ErrRegistrationRefused):
+		return "registration_refused", true
+	case errors.Is(err, identity.ErrTombstoneKeyUnavailable):
+		return "temporarily_unavailable", true
+	case errors.Is(err, identity.ErrAccountTrashed):
+		return "account_trashed", true
+	case errors.Is(err, identity.ErrEmailConflict):
+		return "email_conflict", true
+	}
+	return "", false
+}
+
+// issueRestrictedSession sets the restricted session cookie for a trashed
+// account and redirects to the restore interstitial. A purge that already
+// committed its claim cannot be restored: the sign-in lands on the
+// unavailable page instead. Reports whether a response other than an error
+// was written.
+func issueRestrictedSession(ctx context.Context, w http.ResponseWriter, r *http.Request, store *identity.Store, user *identity.User, baseURL string, secure bool) bool {
+	if user.PurgeClaimed {
+		http.Redirect(w, r, baseURL+AccountUnavailablePath+"?code=purge_in_progress", http.StatusFound)
+		return true
+	}
+	token, err := store.CreateRestrictedUserSession(ctx, user.ID)
+	if err != nil {
+		http.Error(w, "failed to create session", http.StatusInternalServerError)
+		return false
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     RestoreSessionCookieName,
+		Value:    token,
+		Path:     "/api/account/",
+		HttpOnly: true,
+		Secure:   secure,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   int(identity.RestrictedSessionTTL.Seconds()),
+	})
+	http.Redirect(w, r, baseURL+AccountRestorePath, http.StatusFound)
+	return true
 }

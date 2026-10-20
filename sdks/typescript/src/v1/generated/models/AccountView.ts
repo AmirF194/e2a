@@ -10,19 +10,45 @@
  * Do not edit the class manually.
  */
 
+import { AccountDailyLimit } from '../models/AccountDailyLimit.js';
 import { AccountUserView } from '../models/AccountUserView.js';
 import { LimitsCapsView } from '../models/LimitsCapsView.js';
 import { LimitsUsageView } from '../models/LimitsUsageView.js';
+import { SendingAccessView } from '../models/SendingAccessView.js';
 import { HttpFile } from '../http/http.js';
 
 export class AccountView {
     'agentEmail'?: string;
+    /**
+    * External-recipient allowance for this UTC day. Used includes pending or uncertain provider submissions. Shared-identity usage is included in total usage and also bounded by shared_limit. Internal recipients (own live agents and verified owner mailbox) do not count. Omitted when this deployment does not enable the account trust ladder.
+    */
+    'dailyLimit'?: AccountDailyLimit;
+    /**
+    * When the account was moved to the trash. Absent for a live account.
+    */
+    'deletedAt'?: Date;
     'limits': LimitsCapsView;
     'planCode': string;
+    /**
+    * When a trashed account becomes eligible for permanent purge. Absent for a live account.
+    */
+    'purgeAfter'?: Date;
+    /**
+    * True while the account is read-only because its sending is paused pending an abuse review: every write is refused with 403 account_read_only, while reads and moving the account to the trash keep working. False otherwise. Absent when the deployment does not report it or its state is unavailable.
+    */
+    'readOnly'?: boolean;
+    /**
+    * When the account was last restored from the trash. Absent if it never was. API keys and domain verification do not survive a trash: keys must be re-created and domains re-verified after a restore.
+    */
+    'restoredAt'?: Date;
     /**
     * Credential scope. Open set: new values may be added over time, so treat these as strings and tolerate unknown values. Known values: account, agent.
     */
     'scope': string;
+    /**
+    * External sending access eligibility (beta). Booleans only; describes what the account may do, not a promise that a given send passes pause, quota, content or domain checks. Omitted when the deployment does not enable external sending access, or when its state is unavailable.
+    */
+    'sendingAccess'?: SendingAccessView;
     'upgradeUrl': string;
     'usage': LimitsUsageView;
     'user': AccountUserView;
@@ -39,6 +65,18 @@ export class AccountView {
             "format": ""
         },
         {
+            "name": "dailyLimit",
+            "baseName": "daily_limit",
+            "type": "AccountDailyLimit",
+            "format": ""
+        },
+        {
+            "name": "deletedAt",
+            "baseName": "deleted_at",
+            "type": "Date",
+            "format": "date-time"
+        },
+        {
             "name": "limits",
             "baseName": "limits",
             "type": "LimitsCapsView",
@@ -51,9 +89,33 @@ export class AccountView {
             "format": ""
         },
         {
+            "name": "purgeAfter",
+            "baseName": "purge_after",
+            "type": "Date",
+            "format": "date-time"
+        },
+        {
+            "name": "readOnly",
+            "baseName": "read_only",
+            "type": "boolean",
+            "format": ""
+        },
+        {
+            "name": "restoredAt",
+            "baseName": "restored_at",
+            "type": "Date",
+            "format": "date-time"
+        },
+        {
             "name": "scope",
             "baseName": "scope",
             "type": "string",
+            "format": ""
+        },
+        {
+            "name": "sendingAccess",
+            "baseName": "sending_access",
+            "type": "SendingAccessView",
             "format": ""
         },
         {

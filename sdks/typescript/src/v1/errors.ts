@@ -109,6 +109,25 @@ const CODE_TABLE: Record<string, { make: Make; retryable: boolean }> = {
   forbidden: { make: mkPermission, retryable: false },
   blocked_by_policy: { make: mkPermission, retryable: false },
   sending_paused: { make: mkPermission, retryable: false },
+  // The account may not send to one or more of the recipients through its
+  // shared sending identity (external-sending-access rollout). PERMISSION,
+  // not quota: nothing was queued, and the same request will not succeed on
+  // retry. `error.details` carries the RAW wire shape described by
+  // `ExternalSendingNotEnabledDetails` in generated/models — like every
+  // `details` payload (see retryAfterFromDetails below), it is the open
+  // `{[key: string]: any}` map from ErrorBody, never renamed to the
+  // generated model's camelCase fields, so read `allowed_recipients` /
+  // `recovery_url`, not `allowedRecipients` / `recoveryUrl`.
+  external_sending_not_enabled: { make: mkPermission, retryable: false },
+  // The sign-in identity behind this credential belongs to a recently
+  // deleted or closed account and cannot register or be restored (account
+  // trash / purge). Not retryable — the same identity will refuse again.
+  registration_refused: { make: mkPermission, retryable: false },
+  // The account is read-only: its sending is paused pending an abuse review,
+  // so every write is refused (reads and moving the account to the trash keep
+  // working). Not retryable — nothing succeeds until an operator resumes the
+  // account; contact support. GET /v1/account reports it as read_only.
+  account_read_only: { make: mkPermission, retryable: false },
   // 404 / 410 — the *_not_found suffix family resolves in resolve() below.
   not_found: { make: mkNotFound, retryable: false },
   gone: { make: mkNotFound, retryable: false },

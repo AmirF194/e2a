@@ -11,6 +11,8 @@ import type {
   WebhookDeliveryView,
   WebhookView,
 } from "../../../lib/webhooks";
+import type { SendingAccessStatus } from "../../../lib/sendingAccess";
+import { ACCOUNT_READ_ONLY_CODE, readOnlyMessageFromBody } from "../../../lib/readOnly";
 import type {
   AttachmentMeta,
   DashboardAgent,
@@ -25,10 +27,13 @@ import type {
  *  status code so callers can branch on 404 vs 500 vs 401. */
 export class ApiError extends Error {
   readonly status: number;
-  constructor(message: string, status: number) {
+  /** Machine code from the error envelope, when the helper recognized one. */
+  readonly code?: string;
+  constructor(message: string, status: number, code?: string) {
     super(message);
     this.name = "ApiError";
     this.status = status;
+    this.code = code;
   }
 }
 
@@ -40,6 +45,11 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   });
   if (!res.ok) {
     const text = await res.text();
+    // A read-only account (sending paused for abuse review) gets the
+    // dashboard copy instead of the raw envelope, on every write this
+    // helper makes.
+    const readOnly = readOnlyMessageFromBody(text);
+    if (readOnly) throw new ApiError(readOnly, res.status, ACCOUNT_READ_ONLY_CODE);
     throw new ApiError(text || `Request failed (${res.status})`, res.status);
   }
   // Successful mutation endpoints may return no body.
@@ -163,10 +173,21 @@ export async function restoreAgent(email: string): Promise<DashboardAgent> {
   );
 }
 
+// The deferral fields of a permanent agent/message delete receipt. A
+// recipient of external mail within the deployment's window is not purged
+// on demand: it stays in the trash until purge_after (erase_deferred).
+export interface PermanentDeleteReceipt {
+  deleted: boolean;
+  erase_deferred?: boolean;
+  purge_after?: string;
+  message?: string;
+}
+
 // DELETE /v1/agents/{email}?permanent=true — irreversible ("delete
-// forever" from the trash view).
-export async function permanentDeleteAgent(email: string): Promise<void> {
-  return request(
+// forever" from the trash view), unless the agent emailed external
+// recipients recently (erase_deferred: it stays in the trash).
+export async function permanentDeleteAgent(email: string): Promise<PermanentDeleteReceipt> {
+  return request<PermanentDeleteReceipt>(
     "/v1/agents/" +
       encodeURIComponent(email) +
       "?confirm=DELETE&permanent=true",
@@ -316,9 +337,10 @@ export async function restoreMessage(email: string, id: string): Promise<void> {
 }
 
 // DELETE …?permanent=true&confirm=DELETE — permanently delete a message
-// that is already in the trash ("delete forever").
-export async function purgeMessage(email: string, id: string): Promise<void> {
-  return request(
+// that is already in the trash ("delete forever"), unless it was sent to
+// external recipients recently (erase_deferred: it stays in the trash).
+export async function purgeMessage(email: string, id: string): Promise<PermanentDeleteReceipt> {
+  return request<PermanentDeleteReceipt>(
     "/v1/agents/" +
       encodeURIComponent(email) +
       "/messages/" +
@@ -950,4 +972,106 @@ export async function getAccountMetrics(opts: {
   if (opts.bucketByDay) params.set("bucket", "day");
   const qs = params.toString();
   return request<AccountMetrics>("/v1/metrics" + (qs ? "?" + qs : ""));
+}
+
+// ── Account (GET /v1/account) ────────────────────────────
+
+// Mirrors AccountView. Kept inline (like billing/page.tsx's LimitsInfo)
+// rather than sourced from a generated client — this is a dashboard-only
+// read. `sending_access` (beta) is entirely omitted by servers/accounts
+// where the external-sending-access control doesn't apply; treat it as
+// "no restriction info" rather than defaulting any of its booleans.
+export type DailySendingLimit = {
+  limit: number;
+  used: number;
+  shared_limit: number;
+  shared_used: number;
+  clean_active_days: number;
+  resets_at: string;
+};
+
+export type AccountInfo = {
+  daily_limit?: DailySendingLimit;
+  user: { id: string; email: string };
+  scope: string;
+  plan_code: string;
+  agent_email?: string;
+  limits: {
+    max_agents: number;
+    max_domains: number;
+    max_messages_month: number;
+    max_storage_bytes: number;
+  };
+  usage: {
+    agents: number;
+    domains: number;
+    messages_month: number;
+    storage_bytes: number;
+  };
+  upgrade_url: string;
+  sending_access?: SendingAccessStatus;
+  // Account soft deletion. restored_at (RFC3339) is present once the account
+  // was restored from the trash; it drives the one-time restored notice.
+  // deleted_at/purge_after describe a trashed account, which an ordinary
+  // dashboard session practically never sees.
+  restored_at?: string;
+  deleted_at?: string;
+  purge_after?: string;
+  // True while the account is read-only (sending paused for abuse review):
+  // every write is refused with 403 account_read_only. Absent on servers
+  // that do not report it.
+  read_only?: boolean;
+};
+
+export async function getAccountInfo(): Promise<AccountInfo> {
+  return request<AccountInfo>("/v1/account");
+}
+
+// ── External sending access request (beta) ───────────────
+//
+// GET/POST /v1/account/sending-access/request. Account-scoped — the
+// account binding is server-side, never sent by the client.
+
+export type SendingAccessRequestState = "pending" | "approved" | "declined" | string;
+
+export type SendingAccessRequest = {
+  id: string;
+  state: SendingAccessRequestState;
+  use_case: string;
+  recipients: string;
+  expected_daily_volume: number;
+  created_at: string;
+  decided_at?: string;
+};
+
+// The account's most recent request, or null when it has never filed one
+// (404 not_found — the documented "no request yet" signal, not an error).
+export async function getSendingAccessRequest(): Promise<SendingAccessRequest | null> {
+  try {
+    return await request<SendingAccessRequest>("/v1/account/sending-access/request");
+  } catch (err) {
+    // 404: no request filed yet. 501: the deployment does not enable
+    // external sending access, so there is no request state to show.
+    if (err instanceof ApiError && (err.status === 404 || err.status === 501)) return null;
+    throw err;
+  }
+}
+
+export type SendingAccessRequestInput = {
+  use_case: string;
+  recipients: string;
+  expected_daily_volume: number;
+};
+
+// 201 (new) and 200 (idempotent replay of an existing pending request) are
+// both success — the caller renders the returned request either way. 429
+// rate_limited (3 requests / 30 days) and 422 invalid_request surface as
+// ApiError for the caller to branch on.
+export async function createSendingAccessRequest(
+  input: SendingAccessRequestInput,
+): Promise<SendingAccessRequest> {
+  return request<SendingAccessRequest>("/v1/account/sending-access/request", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
 }

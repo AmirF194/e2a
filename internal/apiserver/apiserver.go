@@ -26,6 +26,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/limits"
 	"github.com/tokencanopy/e2a/internal/messagelifecycle"
+	"github.com/tokencanopy/e2a/internal/sendingpolicy"
 	"github.com/tokencanopy/e2a/internal/sendramp"
 	"github.com/tokencanopy/e2a/internal/usage"
 	"github.com/tokencanopy/e2a/internal/webhook"
@@ -40,8 +41,11 @@ type Params struct {
 	Enforcer        *limits.DBEnforcer
 	UsageStore      *usage.Store
 	SubscriberStore *webhook.SubscriberStore
-	Idempotency     *idempotency.Store
-	Pool            *pgxpool.Pool
+	// SendingAccess is the external-sending-access owner (status readback
+	// and request intake). Optional — nil leaves those surfaces absent.
+	SendingAccess *sendingpolicy.Module
+	Idempotency   *idempotency.Store
+	Pool          *pgxpool.Pool
 
 	SMTPDomain   string
 	SharedDomain string
@@ -99,6 +103,10 @@ type Params struct {
 	// slice is wired by the caller.
 	AgentSuppressionAddedHook identity.AgentSuppressionTxHook
 	ManagedUnsubscribeIssuer  agent.ManagedUnsubscribeIssuer
+
+	// SupportContact is the support address named in the account_read_only
+	// error (config notifications.SupportContact()). Optional.
+	SupportContact string
 }
 
 // SenderIdentityEnqueuer is the slice of *senderidentity.Manager apiserver
@@ -120,10 +128,23 @@ type SenderIdentityEnqueuer interface {
 func BuildDeps(p Params) httpapi.Deps {
 	if p.API != nil {
 		p.API.SetManagedUnsubscribeIssuer(p.ManagedUnsubscribeIssuer)
+		p.API.SetSupportContact(p.SupportContact)
 	}
 	var rampSnapshot func(context.Context, string, string, time.Time) (sendramp.Snapshot, error)
 	if p.Pool != nil {
-		rampSnapshot = sendramp.NewStore(p.Pool).Snapshot
+		legacyRamp := sendramp.NewStore(p.Pool)
+		rampSnapshot = func(ctx context.Context, user, domain string, now time.Time) (sendramp.Snapshot, error) {
+			if p.SendingAccess != nil {
+				enabled, err := p.SendingAccess.AccountTrustEnabled(ctx)
+				if err != nil {
+					return sendramp.Snapshot{}, err
+				}
+				if enabled {
+					return sendramp.Snapshot{Status: "account_managed"}, nil
+				}
+			}
+			return legacyRamp.Snapshot(ctx, user, domain, now)
+		}
 	}
 	var listMessageLifecycle httpapi.MessageLifecycleLister
 	var countAgentMetrics httpapi.AgentMetricsCounter
@@ -184,13 +205,13 @@ func BuildDeps(p Params) httpapi.Deps {
 		// Trash semantics (docs/design/trash-soft-delete.md): the default
 		// delete is soft; the hard delete sits behind ?permanent=true.
 		DeleteAgent:          p.Store.SoftDeleteAgent,
-		PermanentDeleteAgent: p.Store.DeleteAgentIncarnation,
+		PermanentDeleteAgent: p.Store.PermanentDeleteAgentIncarnation,
 		RestoreAgent:         p.Store.RestoreAgent,
 		GetAgentAnyState:     p.Store.GetAgentByIDAnyState,
 		ListDeletedAgents:    p.Store.ListDeletedAgentsByUser,
 		DeleteMessage:        p.Store.SoftDeleteMessage,
 		RestoreMessage:       p.Store.RestoreMessage,
-		PurgeMessage:         p.Store.PurgeMessage,
+		PurgeMessage:         p.Store.PurgeMessageOrDefer,
 
 		ListDomains:                  p.Store.ListDomainsByUser,
 		SendingRampSnapshot:          rampSnapshot,
@@ -222,8 +243,14 @@ func BuildDeps(p Params) httpapi.Deps {
 		EnforceMessageSend:           p.Enforcer.CheckMessageSend,
 		GetRepliableMessage:          p.Store.GetRepliableMessage,
 		GetLimits:                    p.Enforcer.Get,
+		NotifySendingAccessRequest:   p.API.NotifySendingAccessRequest,
 		ExportUserData:               p.API.ExportUserDataCore,
 		DeleteUserData:               p.API.DeleteUserDataCore,
+		RestrictedSession:            p.API.RestrictedSession,
+		RestoreAccount:               p.API.RestoreAccountCore,
+		WriteSessionCookie:           p.API.WriteSessionCookie,
+		SameOriginRequest:            p.API.SameOriginDashboardRequest,
+		ClearRestoreSessionCookie:    p.API.ClearRestoreSessionCookie,
 		ListSuppressions:             p.Store.ListSuppressions,
 		RemoveSuppression:            p.Store.RemoveSuppression,
 		AddAgentSuppression:          p.Store.AddAgentSuppression,
@@ -314,6 +341,11 @@ func BuildDeps(p Params) httpapi.Deps {
 		},
 		EnqueueSenderProvision: enqueueSenderProvisionFunc(p),
 
+		// Read-only accounts (sending paused for abuse): the /v1 guard
+		// consults the control row on every write, uncached.
+		AccountReadOnly: p.Store.AccountReadOnly,
+		SupportContact:  p.SupportContact,
+
 		SharedDomain: p.SharedDomain,
 		PublicURL:    p.PublicURL,
 		APIURL:       p.APIURL,
@@ -321,6 +353,13 @@ func BuildDeps(p Params) httpapi.Deps {
 		Legacy:       p.Legacy,
 		Metrics:      p.Metrics,
 	}
+	if p.SendingAccess != nil {
+		deps.AccountDailyLimit = p.SendingAccess.AccountDailyLimit
+		deps.SendingAccessStatus = p.SendingAccess.ExternalAccessStatus
+		deps.SubmitSendingAccessRequest = p.SendingAccess.SubmitAccessRequest
+		deps.LatestSendingAccessRequest = p.SendingAccess.LatestAccessRequest
+	}
+
 	deps.ResolveUnsubscribeToken = p.Store.ResolveUnsubscribeToken
 	deps.AddAgentSuppressionFromTokenScope = p.Store.AddAgentSuppressionFromTokenScope
 	deps.AgentSuppressionAddedHook = p.AgentSuppressionAddedHook

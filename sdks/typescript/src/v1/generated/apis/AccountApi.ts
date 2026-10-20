@@ -18,6 +18,8 @@ import { DeleteUserDataResult } from '../models/DeleteUserDataResult.js';
 import { ErrorEnvelope } from '../models/ErrorEnvelope.js';
 import { PageAPIKeyView } from '../models/PageAPIKeyView.js';
 import { PageSuppressionView } from '../models/PageSuppressionView.js';
+import { SendingAccessRequestInput } from '../models/SendingAccessRequestInput.js';
+import { SendingAccessRequestView } from '../models/SendingAccessRequestView.js';
 import { UserExport } from '../models/UserExport.js';
 
 /**
@@ -79,17 +81,67 @@ export class AccountApiRequestFactory extends BaseAPIRequestFactory {
     }
 
     /**
-     * Permanently deletes the account and cascades all owned data. Requires ?confirm=DELETE. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true plus per-table cascade counts) — like every delete op, which all return 200 + a deletion object.
-     * Delete your account + all data (irreversible)
-     * @param confirm Must be the literal DELETE — this action is irreversible.
+     * Files a request for support to review this account\'s external sending access. Idempotent while a request is pending: submitting again returns the existing pending request (200) instead of creating another (201). After a decline a new request may be filed as an appeal, up to 3 requests per 30 days (429 rate_limited beyond that). Filing a request never grants access by itself. 409 conflict when the account is not currently restricted (enforcement does not apply to it, it is already approved, or an available unlock already lifts the restriction) — nothing is filed. 501 not_implemented when the deployment does not enable external sending access. Account-scoped credentials only. Beta: external sending access is a platform control that ships disabled; this surface may evolve.
+     * Request external sending access (beta)
+     * @param sendingAccessRequestInput 
      */
-    public async deleteAccount(confirm: 'DELETE', _options?: Configuration): Promise<RequestContext> {
+    public async createSendingAccessRequest(sendingAccessRequestInput: SendingAccessRequestInput, _options?: Configuration): Promise<RequestContext> {
+        let _config = _options || this.configuration;
+
+        // verify required parameter 'sendingAccessRequestInput' is not null or undefined
+        if (sendingAccessRequestInput === null || sendingAccessRequestInput === undefined) {
+            throw new RequiredError("AccountApi", "createSendingAccessRequest", "sendingAccessRequestInput");
+        }
+
+
+        // Path Params
+        const localVarPath = '/v1/account/sending-access/request';
+
+        // Make Request Context
+        const requestContext = _config.baseServer.makeRequestContext(localVarPath, HttpMethod.POST);
+        requestContext.setHeaderParam("Accept", "application/json, */*;q=0.8")
+
+
+        // Body Params
+        const contentType = ObjectSerializer.getPreferredMediaType([
+            "application/json"
+        ]);
+        requestContext.setHeaderParam("Content-Type", contentType);
+        const serializedBody = ObjectSerializer.stringify(
+            ObjectSerializer.serialize(sendingAccessRequestInput, "SendingAccessRequestInput", ""),
+            contentType
+        );
+        requestContext.setBody(serializedBody);
+
+        let authMethod: SecurityAuthentication | undefined;
+        // Apply auth methods
+        authMethod = _config.authMethods["bearer"]
+        if (authMethod?.applySecurityAuthentication) {
+            await authMethod?.applySecurityAuthentication(requestContext);
+        }
+        
+        const defaultAuth: SecurityAuthentication | undefined = _config?.authMethods?.default
+        if (defaultAuth?.applySecurityAuthentication) {
+            await defaultAuth?.applySecurityAuthentication(requestContext);
+        }
+
+        return requestContext;
+    }
+
+    /**
+     * Moves the account to the trash. Requires ?confirm=DELETE. The account becomes unusable at once: every API key, OAuth grant and dashboard session is revoked, every agent is trashed (inbound mail is refused), sending stops, and every custom domain loses its verification. Signing in to the dashboard before purge_after offers a restore — keys stay revoked and domains must be re-verified — after which the account and all its data are purged permanently (the trash window is deployment-configurable; 30 days by default). Pass permanent=true to erase the account and all its data immediately instead (refused with 409 erase_held while the account\'s sending is paused). An account that emailed external recipients recently (within a deployment-configured window, 14 days by default) is not erased at once even with permanent=true: it is moved to the trash like a default delete and purged at purge_after, so delivery feedback such as spam complaints that arrives after a send still reaches it; the receipt then has mode trash, erase_deferred:true, purge_after and a message, and the owner can still restore it before purge_after. On deployments that disable account trash, every deletion is permanent. Either way the account\'s sign-in identity may be held for a period after deletion and cannot immediately register a new account. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true, mode, and per-table counts) — like every delete op, which all return 200 + a deletion object.
+     * Delete your account (trash by default; permanent=true erases now)
+     * @param confirm Must be the literal DELETE. The default action moves the account to the trash; permanent&#x3D;true is irreversible.
+     * @param permanent Erase the account and all its data immediately instead of moving it to the trash. Irreversible. An account that emailed external recipients recently is moved to the trash instead (receipt erase_deferred:true) and purged at purge_after.
+     */
+    public async deleteAccount(confirm: 'DELETE', permanent?: boolean, _options?: Configuration): Promise<RequestContext> {
         let _config = _options || this.configuration;
 
         // verify required parameter 'confirm' is not null or undefined
         if (confirm === null || confirm === undefined) {
             throw new RequiredError("AccountApi", "deleteAccount", "confirm");
         }
+
 
 
         // Path Params
@@ -102,6 +154,11 @@ export class AccountApiRequestFactory extends BaseAPIRequestFactory {
         // Query Params
         if (confirm !== undefined) {
             requestContext.setQueryParam("confirm", ObjectSerializer.serialize(confirm, "'DELETE'", ""));
+        }
+
+        // Query Params
+        if (permanent !== undefined) {
+            requestContext.setQueryParam("permanent", ObjectSerializer.serialize(permanent, "boolean", ""));
         }
 
 
@@ -339,6 +396,36 @@ export class AccountApiRequestFactory extends BaseAPIRequestFactory {
     }
 
     /**
+     * The account\'s most recent request for external sending access, with its review state. 404 not_found when the account has never filed one; 501 not_implemented when the deployment does not enable external sending access. Account-scoped credentials only. Beta: external sending access is a platform control that ships disabled; this surface may evolve.
+     * Get your latest external sending access request (beta)
+     */
+    public async getSendingAccessRequest(_options?: Configuration): Promise<RequestContext> {
+        let _config = _options || this.configuration;
+
+        // Path Params
+        const localVarPath = '/v1/account/sending-access/request';
+
+        // Make Request Context
+        const requestContext = _config.baseServer.makeRequestContext(localVarPath, HttpMethod.GET);
+        requestContext.setHeaderParam("Accept", "application/json, */*;q=0.8")
+
+
+        let authMethod: SecurityAuthentication | undefined;
+        // Apply auth methods
+        authMethod = _config.authMethods["bearer"]
+        if (authMethod?.applySecurityAuthentication) {
+            await authMethod?.applySecurityAuthentication(requestContext);
+        }
+        
+        const defaultAuth: SecurityAuthentication | undefined = _config?.authMethods?.default
+        if (defaultAuth?.applySecurityAuthentication) {
+            await defaultAuth?.applySecurityAuthentication(requestContext);
+        }
+
+        return requestContext;
+    }
+
+    /**
      * API keys for the account (metadata only — secrets are shown once, at creation). Account scope only: an agent-scoped credential cannot manage keys.
      * List API keys
      * @param cursor Opaque pagination cursor from a previous response\&#39;s next_cursor. Continuation requests must not change the other filters.
@@ -484,6 +571,49 @@ export class AccountApiResponseProcessor {
      * Unwraps the actual response sent by the server from the response context and deserializes the response content
      * to the expected objects
      *
+     * @params response Response returned by the server for a request to createSendingAccessRequest
+     * @throws ApiException if the response code was not in [200, 299]
+     */
+     public async createSendingAccessRequestWithHttpInfo(response: ResponseContext): Promise<HttpInfo<SendingAccessRequestView >> {
+        const contentType = ObjectSerializer.normalizeMediaType(response.headers["content-type"]);
+        if (isCodeInRange("200", response.httpStatusCode)) {
+            const body: SendingAccessRequestView = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "SendingAccessRequestView", ""
+            ) as SendingAccessRequestView;
+            return new HttpInfo(response.httpStatusCode, response.headers, response.body, body);
+        }
+        if (isCodeInRange("201", response.httpStatusCode)) {
+            const body: SendingAccessRequestView = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "SendingAccessRequestView", ""
+            ) as SendingAccessRequestView;
+            return new HttpInfo(response.httpStatusCode, response.headers, response.body, body);
+        }
+        if (isCodeInRange("0", response.httpStatusCode)) {
+            const body: ErrorEnvelope = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "ErrorEnvelope", ""
+            ) as ErrorEnvelope;
+            throw new ApiException<ErrorEnvelope>(response.httpStatusCode, "Error — the standard envelope; branch on error.code.", body, response.headers);
+        }
+
+        // Work around for missing responses in specification, e.g. for petstore.yaml
+        if (response.httpStatusCode >= 200 && response.httpStatusCode <= 299) {
+            const body: SendingAccessRequestView = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "SendingAccessRequestView", ""
+            ) as SendingAccessRequestView;
+            return new HttpInfo(response.httpStatusCode, response.headers, response.body, body);
+        }
+
+        throw new ApiException<string | Blob | undefined>(response.httpStatusCode, "Unknown API Status Code!", await response.getBodyAsAny(), response.headers);
+    }
+
+    /**
+     * Unwraps the actual response sent by the server from the response context and deserializes the response content
+     * to the expected objects
+     *
      * @params response Response returned by the server for a request to deleteAccount
      * @throws ApiException if the response code was not in [200, 299]
      */
@@ -501,7 +631,7 @@ export class AccountApiResponseProcessor {
                 ObjectSerializer.parse(await response.body.text(), contentType),
                 "ErrorEnvelope", ""
             ) as ErrorEnvelope;
-            throw new ApiException<ErrorEnvelope>(response.httpStatusCode, "Conflict — code send_in_progress: an outbound provider call has a fresh lease. Retry after it finishes.", body, response.headers);
+            throw new ApiException<ErrorEnvelope>(response.httpStatusCode, "Conflict — code send_in_progress: an outbound provider call has a fresh lease. Retry after it finishes. Code erase_held: permanent&#x3D;true while the account\&#39;s sending is paused; delete without permanent to move it to the trash.", body, response.headers);
         }
         if (isCodeInRange("0", response.httpStatusCode)) {
             const body: ErrorEnvelope = ObjectSerializer.deserialize(
@@ -704,6 +834,42 @@ export class AccountApiResponseProcessor {
                 ObjectSerializer.parse(await response.body.text(), contentType),
                 "AccountMetricsView", ""
             ) as AccountMetricsView;
+            return new HttpInfo(response.httpStatusCode, response.headers, response.body, body);
+        }
+
+        throw new ApiException<string | Blob | undefined>(response.httpStatusCode, "Unknown API Status Code!", await response.getBodyAsAny(), response.headers);
+    }
+
+    /**
+     * Unwraps the actual response sent by the server from the response context and deserializes the response content
+     * to the expected objects
+     *
+     * @params response Response returned by the server for a request to getSendingAccessRequest
+     * @throws ApiException if the response code was not in [200, 299]
+     */
+     public async getSendingAccessRequestWithHttpInfo(response: ResponseContext): Promise<HttpInfo<SendingAccessRequestView >> {
+        const contentType = ObjectSerializer.normalizeMediaType(response.headers["content-type"]);
+        if (isCodeInRange("200", response.httpStatusCode)) {
+            const body: SendingAccessRequestView = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "SendingAccessRequestView", ""
+            ) as SendingAccessRequestView;
+            return new HttpInfo(response.httpStatusCode, response.headers, response.body, body);
+        }
+        if (isCodeInRange("0", response.httpStatusCode)) {
+            const body: ErrorEnvelope = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "ErrorEnvelope", ""
+            ) as ErrorEnvelope;
+            throw new ApiException<ErrorEnvelope>(response.httpStatusCode, "Error", body, response.headers);
+        }
+
+        // Work around for missing responses in specification, e.g. for petstore.yaml
+        if (response.httpStatusCode >= 200 && response.httpStatusCode <= 299) {
+            const body: SendingAccessRequestView = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "SendingAccessRequestView", ""
+            ) as SendingAccessRequestView;
             return new HttpInfo(response.httpStatusCode, response.headers, response.body, body);
         }
 

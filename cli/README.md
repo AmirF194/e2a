@@ -63,7 +63,14 @@ e2a keys create --agent bot@acme.com
 
 ### `e2a whoami`
 
-Show the key identity: user, scope, bound agent, plan.
+Show the key identity: user, scope, bound agent, plan. When the deployment
+reports `sending_access` (beta — see `e2a sending-access` below) and this
+account is currently restricted to the narrow shared-identity allowlist, an
+extra `External sending: restricted (...)` line points at how to recover —
+naming only the routes the deployment's `available_unlocks` honors. If
+the account was restored from the trash (`e2a account delete` below), an
+extra `restored: <timestamp> (from trash)` line appears. `--json` always
+includes the raw `sending_access` object when present.
 
 ```bash
 e2a whoami
@@ -177,6 +184,32 @@ e2a keys delete <key-id>
 
 `create` and `list` accept `--json` (print the raw JSON response).
 
+### `e2a account`
+
+Delete your account (requires an account-scoped key).
+
+```bash
+e2a account delete                    # moves the account to the trash (interactive confirmation)
+e2a account delete --yes              # same, non-interactive (scripts/CI)
+e2a account delete --permanent --yes  # erase the account and all its data immediately — irreversible
+```
+
+By default the account is moved to the trash: every API key, OAuth grant, and
+dashboard session is revoked and sending stops immediately, but the account is
+restorable by signing in to the dashboard before the printed purge date (API
+keys stay revoked and custom domains must be re-verified after a restore).
+Pass `--permanent` to erase the account and all its data right away instead —
+this cannot be undone.
+
+Without `--yes`, the command prompts you to type the account's own email
+address to confirm; it refuses immediately (exit `2`) when stdin is not a TTY,
+so an unattended script must pass `--yes` explicitly. Because the deleted
+account's API key stops working the instant the request succeeds, the CLI
+clears the stored key from `~/.e2a/config.json` afterward — run `e2a login`
+again against a different account if you need the CLI to keep working.
+
+`--json` prints the raw deletion receipt instead of the human summary.
+
 ### `e2a protection`
 
 Show or update an agent's protection (screening/review) config.
@@ -232,6 +265,13 @@ has already passed. Trashing the message before provider submission starts preve
 submission (an in-flight submission returns `409 send_in_progress`); restoring it before the
 send time re-arms it, while restoring at or after that time restores the
 message but leaves the send canceled.
+
+A restricted account (see `e2a sending-access` above) gets `Error: ...
+[external_sending_not_enabled]` when any To/Cc/Bcc recipient falls outside
+the shared identity's allowed destinations — the whole send is refused,
+nothing is queued, and the output names the allowed destinations plus a
+dashboard recovery URL when the server provides one. Exit code 5
+(permanent request error): do not retry the identical invocation.
 
 ### `e2a messages`
 
@@ -337,6 +377,26 @@ come from bounces/complaints. `remove` without `--agent` un-suppresses
 account-wide: do that only for addresses known to be deliverable, since
 removing a genuine bouncer hurts sender reputation. `list` supports `--limit`
 and `--json` (NDJSON instead of TSV: address, source, reason, created-at).
+
+### `e2a sending-access` (beta)
+
+External sending access is a platform control on the shared sending identity:
+while an account is restricted, it may only send to its verified account
+email and to agent inboxes in the same account — any other To/Cc/Bcc refuses
+the whole send with `external_sending_not_enabled` (see `e2a send`/`e2a
+reply` below). `status` shows the current restriction, the deployment's
+`available unlocks` (`operator_approval` always; `verified_domain` and
+`paid_entitlement` only where the deployment accepts them — the hosted service
+accepts approval only), and the account's latest access request, if any;
+`request` files a new one for an operator to review. File one request: the
+decision is emailed to the account owner. Filing never grants access by
+itself, and is capped at 3 requests per 30 days.
+
+```bash
+e2a sending-access status
+e2a sending-access request --use-case "billing reminders to signed-up customers" \
+  --recipients "our own customers" --volume 500
+```
 
 ### `e2a listen`
 
@@ -463,3 +523,4 @@ only added to.
 | `7` | A persisted send failed or returned an unrecognized outcome — do not retry; inspect the returned message id |
 | `8` | Diagnostics (`doctor`) completed with warnings only — nothing broken |
 | `9` | Diagnostics (`doctor`) found a definite configuration failure — do not retry; fix the reported configuration |
+| `10` | The account is read-only (`account_read_only`): sending is paused pending an abuse review, so every write is refused — do not retry or rotate keys; contact support |

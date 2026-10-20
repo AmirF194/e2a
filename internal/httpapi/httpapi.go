@@ -20,6 +20,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/limits"
 	"github.com/tokencanopy/e2a/internal/messagelifecycle"
 	"github.com/tokencanopy/e2a/internal/outbound"
+	"github.com/tokencanopy/e2a/internal/sendingpolicy"
 	"github.com/tokencanopy/e2a/internal/sendramp"
 	"github.com/tokencanopy/e2a/internal/webhook"
 )
@@ -113,9 +114,11 @@ type AgentCreateEnforcer func(ctx context.Context, userID string) error
 
 // Agent mutation funcs mirror the like-named store methods.
 type (
-	// AgentDeleter deletes an agent, returning the number of message rows
-	// removed by the cascade (surfaced in the DeleteAgentResult receipt).
-	AgentDeleter func(ctx context.Context, agentID, userID string, createdAt time.Time) (messagesDeleted int64, err error)
+	// AgentDeleter permanently deletes an agent, returning the number of
+	// message rows removed by the cascade — or, for an agent that emailed
+	// external recipients recently, the deferral to the agent trash
+	// (surfaced in the DeleteAgentResult receipt).
+	AgentDeleter func(ctx context.Context, agentID, userID string, createdAt time.Time) (identity.AgentPurgeResult, error)
 	// AgentTrashOp moves an agent into or out of trash without deleting messages.
 	AgentTrashOp func(ctx context.Context, agentID, userID string) error
 	// AgentRestoreOp is AgentTrashOp's returning form: restore answers with the
@@ -131,6 +134,11 @@ type (
 // ErrMessageNotFound for the handler to map.
 type MessageTrashOp func(ctx context.Context, messageID, agentID string) error
 
+// MessagePurger permanently deletes an already-trashed message, or reports
+// that the purge was deferred (the message was sent to external recipients
+// recently and stays in the trash until purge_after).
+type MessagePurger func(ctx context.Context, messageID, agentID string) (identity.MessagePurgeResult, error)
+
 // MessageRestoreOp is MessageTrashOp's returning form, used by RestoreMessage
 // for the same reason AgentRestoreOp exists: the restored view comes from
 // inside the restore transaction rather than a racy re-read afterwards.
@@ -139,6 +147,16 @@ type MessageRestoreOp func(ctx context.Context, messageID, agentID string) (*ide
 // Deps are the collaborators the v1 layer needs. Everything is injected so
 // the package has no hidden globals and is straightforward to test.
 type Deps struct {
+	AccountDailyLimit func(context.Context, string) (*sendramp.AccountDailyLimit, error)
+	// External sending access (all optional; nil = surface absent/501).
+	// SendingAccessStatus backs the additive sending_access object on GET
+	// /v1/account; the request pair backs /v1/account/sending-access/request;
+	// NotifySendingAccessRequest emails the operator after a new request.
+	SendingAccessStatus        func(ctx context.Context, userID string) (sendingpolicy.ExternalAccessStatus, error)
+	SubmitSendingAccessRequest func(ctx context.Context, userID string, in sendingpolicy.AccessRequestInput) (sendingpolicy.AccessRequest, bool, error)
+	LatestSendingAccessRequest func(ctx context.Context, userID string) (*sendingpolicy.AccessRequest, error)
+	NotifySendingAccessRequest func(ctx context.Context, userID string, req sendingpolicy.AccessRequest)
+
 	Authenticator          Authenticator
 	PrincipalAuthenticator PrincipalAuthenticator
 	// AuthChallenge builds the RFC 6750 §3 WWW-Authenticate header value for a
@@ -209,7 +227,7 @@ type Deps struct {
 	// trash-only permanent purge.
 	DeleteMessage  MessageTrashOp
 	RestoreMessage MessageRestoreOp
-	PurgeMessage   MessageTrashOp
+	PurgeMessage   MessagePurger
 
 	// domains. ListDomains is keyset-paginated on (created_at, domain): the
 	// handler passes limit+1 to detect a further page (limit<=0 = all), and the
@@ -371,7 +389,37 @@ type Deps struct {
 	// Shared transaction hook for both authenticated manual creation and the
 	// public recipient flow; the store invokes it only for a newly inserted row.
 	AgentSuppressionAddedHook identity.AgentSuppressionTxHook
-	DeleteUserData            func(ctx context.Context, user *identity.User) (*identity.DeleteUserDataResult, error)
+	// DeleteUserData trashes the account (permanent=false) or erases it now
+	// (permanent=true). Returns identity.ErrSendInProgress,
+	// identity.ErrTombstoneKeyUnavailable, identity.ErrPurgeInProgress.
+	DeleteUserData func(ctx context.Context, user *identity.User, permanent bool) (*identity.DeleteUserDataResult, error)
+
+	// Account restore interstitial (dashboard-only, not /v1). All optional;
+	// the /api/account/* routes are registered only when all three are set.
+	// RestrictedSession resolves the request's restricted session cookie to
+	// its trashed user and the session token (pgx.ErrNoRows when absent).
+	RestrictedSession func(r *http.Request) (*identity.User, string, error)
+	// RestoreAccount restores the trashed account and upgrades the session.
+	RestoreAccount func(ctx context.Context, userID, sessionToken string) (*identity.User, error)
+	// ClearRestoreSessionCookie expires the restricted-session cookie.
+	ClearRestoreSessionCookie func(w http.ResponseWriter)
+	// SameOriginRequest is the CSRF check for the state-changing restore and
+	// erase routes (Origin/Referer must be the dashboard origin). Required:
+	// without it the routes are not registered.
+	SameOriginRequest func(r *http.Request) bool
+	// WriteSessionCookie sets the dashboard session cookie on the response:
+	// a restore re-issues the upgraded session with its full lifetime (the
+	// restricted cookie was short-lived), and an erase expires it (maxAge < 0).
+	WriteSessionCookie func(w http.ResponseWriter, token string, maxAge time.Duration)
+
+	// AccountReadOnly reports whether the account is read-only (sending
+	// paused with pause class abuse). The readOnlyGuard middleware consults it
+	// on every write; nil disables read-only enforcement (minimal test
+	// setups). Production wires identity.Store.AccountReadOnly.
+	AccountReadOnly func(ctx context.Context, userID string) (bool, error)
+	// SupportContact is the support address named in the account_read_only
+	// message. Optional; empty says "contact support" without an address.
+	SupportContact string
 
 	// events (delivery log). EventQuery carries the filters + cursor
 	// position; the closures bind the events pool in main.
@@ -600,6 +648,9 @@ func New(deps Deps) *Server {
 	// RateLimit-* headers on the response and short-circuit a 429 before the
 	// handler. Registered once; applies to every operation.
 	api.UseMiddleware(s.rateLimit)
+	// Read-only accounts: the single /v1 enforcement point that refuses every
+	// write for an account paused for abuse (read_only.go).
+	api.UseMiddleware(s.readOnlyGuard)
 	s.registerOperations()
 	s.applyAuthenticationNullability()
 	// Post-registration document passes, in order: drop the phantom
@@ -644,6 +695,9 @@ func New(deps Deps) *Server {
 	// Managed unsubscribe is a bearer-capability route, not an authenticated
 	// /v1 management operation. GET is deliberately read-only for link scanners.
 	root.Handle("/u/{token}", http.HandlerFunc(s.handlePublicUnsubscribe))
+
+	// Account-restore interstitial (restricted dashboard session only).
+	s.registerAccountRestoreRoutes()
 
 	// HITL magic-link pages (approve/reject confirmation + execution). Raw
 	// token-gated HTML handlers owned by internal/agent — NOT Huma
@@ -785,6 +839,7 @@ func (s *Server) registerOperations() {
 	s.registerStarterTemplates()
 	s.registerEvents()
 	s.registerAccount()
+	s.registerSendingAccess()
 	s.registerAgentSuppressions()
 	s.registerContacts()
 	s.registerContactImport()

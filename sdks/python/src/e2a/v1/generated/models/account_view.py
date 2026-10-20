@@ -17,11 +17,14 @@ import pprint
 import re  # noqa: F401
 import json
 
-from pydantic import BaseModel, ConfigDict, Field, StrictStr
+from datetime import datetime
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr
 from typing import Any, ClassVar, Dict, List, Optional
+from e2a.v1.generated.models.account_daily_limit import AccountDailyLimit
 from e2a.v1.generated.models.account_user_view import AccountUserView
 from e2a.v1.generated.models.limits_caps_view import LimitsCapsView
 from e2a.v1.generated.models.limits_usage_view import LimitsUsageView
+from e2a.v1.generated.models.sending_access_view import SendingAccessView
 from typing import Optional, Set
 from typing_extensions import Self
 
@@ -30,14 +33,20 @@ class AccountView(BaseModel):
     AccountView
     """ # noqa: E501
     agent_email: Optional[StrictStr] = None
+    daily_limit: Optional[AccountDailyLimit] = Field(default=None, description="External-recipient allowance for this UTC day. Used includes pending or uncertain provider submissions. Shared-identity usage is included in total usage and also bounded by shared_limit. Internal recipients (own live agents and verified owner mailbox) do not count. Omitted when this deployment does not enable the account trust ladder.")
+    deleted_at: Optional[datetime] = Field(default=None, description="When the account was moved to the trash. Absent for a live account.")
     limits: LimitsCapsView
     plan_code: StrictStr
+    purge_after: Optional[datetime] = Field(default=None, description="When a trashed account becomes eligible for permanent purge. Absent for a live account.")
+    read_only: Optional[StrictBool] = Field(default=None, description="True while the account is read-only because its sending is paused pending an abuse review: every write is refused with 403 account_read_only, while reads and moving the account to the trash keep working. False otherwise. Absent when the deployment does not report it or its state is unavailable.")
+    restored_at: Optional[datetime] = Field(default=None, description="When the account was last restored from the trash. Absent if it never was. API keys and domain verification do not survive a trash: keys must be re-created and domains re-verified after a restore.")
     scope: StrictStr = Field(description="Credential scope. Open set: new values may be added over time, so treat these as strings and tolerate unknown values. Known values: account, agent.")
+    sending_access: Optional[SendingAccessView] = Field(default=None, description="External sending access eligibility (beta). Booleans only; describes what the account may do, not a promise that a given send passes pause, quota, content or domain checks. Omitted when the deployment does not enable external sending access, or when its state is unavailable.")
     upgrade_url: StrictStr
     usage: LimitsUsageView
     user: AccountUserView
     additional_properties: Dict[str, Any] = {}
-    __properties: ClassVar[List[str]] = ["agent_email", "limits", "plan_code", "scope", "upgrade_url", "usage", "user"]
+    __properties: ClassVar[List[str]] = ["agent_email", "daily_limit", "deleted_at", "limits", "plan_code", "purge_after", "read_only", "restored_at", "scope", "sending_access", "upgrade_url", "usage", "user"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -80,9 +89,15 @@ class AccountView(BaseModel):
             exclude=excluded_fields,
             exclude_none=True,
         )
+        # override the default output from pydantic by calling `to_dict()` of daily_limit
+        if self.daily_limit:
+            _dict['daily_limit'] = self.daily_limit.to_dict()
         # override the default output from pydantic by calling `to_dict()` of limits
         if self.limits:
             _dict['limits'] = self.limits.to_dict()
+        # override the default output from pydantic by calling `to_dict()` of sending_access
+        if self.sending_access:
+            _dict['sending_access'] = self.sending_access.to_dict()
         # override the default output from pydantic by calling `to_dict()` of usage
         if self.usage:
             _dict['usage'] = self.usage.to_dict()
@@ -107,9 +122,15 @@ class AccountView(BaseModel):
 
         _obj = cls.model_validate({
             "agent_email": obj.get("agent_email"),
+            "daily_limit": AccountDailyLimit.from_dict(obj["daily_limit"]) if obj.get("daily_limit") is not None else None,
+            "deleted_at": obj.get("deleted_at"),
             "limits": LimitsCapsView.from_dict(obj["limits"]) if obj.get("limits") is not None else None,
             "plan_code": obj.get("plan_code"),
+            "purge_after": obj.get("purge_after"),
+            "read_only": obj.get("read_only"),
+            "restored_at": obj.get("restored_at"),
             "scope": obj.get("scope"),
+            "sending_access": SendingAccessView.from_dict(obj["sending_access"]) if obj.get("sending_access") is not None else None,
             "upgrade_url": obj.get("upgrade_url"),
             "usage": LimitsUsageView.from_dict(obj["usage"]) if obj.get("usage") is not None else None,
             "user": AccountUserView.from_dict(obj["user"]) if obj.get("user") is not None else None

@@ -12,6 +12,13 @@ import {
 import type { McpClient } from "../src/client.js";
 import { buildServer } from "../src/server.js";
 import { ADMIN_TOOLS, assertToolTiersComplete, toolNamesForScope, RUNTIME_TOOLS } from "../src/tools/tiers.js";
+import {
+  assertMutatingClassificationComplete,
+  MUTATING_META_KEY,
+  MUTATING_TOOLS,
+  NON_MUTATING_TOOLS,
+  TOOL_OPERATIONS,
+} from "../src/tools/mutating.js";
 import { messageSummaryViewForTool, registerMessageTools } from "../src/tools/messages.js";
 import { registerAgentTools } from "../src/tools/agents.js";
 import { registerDomainTools } from "../src/tools/domains.js";
@@ -24,6 +31,7 @@ import { registerLegacyTools } from "../src/tools/legacy.js";
 import { registerContactTools } from "../src/tools/contacts.js";
 import { registerSuppressionTools } from "../src/tools/suppressions.js";
 import { registerMetricsTools } from "../src/tools/metrics.js";
+import { registerSendingAccessTools } from "../src/tools/sendingaccess.js";
 import { CodedError, runTool, toMcpOutput } from "../src/tools/util.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
@@ -477,6 +485,23 @@ describe("e2a MCP server", () => {
     }
   });
 
+  // A restricted account's send/reply/forward can be refused mid-flight with
+  // external_sending_not_enabled (403) — the tool description must tell an
+  // agent what that means (allowed destinations, recovery, no retry) BEFORE
+  // it ever calls the tool, not just leave it to the error text.
+  it("documents external_sending_not_enabled on every send-shaped tool, including the deprecated alias", async () => {
+    const { tools } = await client.listTools();
+    const byName = new Map(tools.map((t) => [t.name, t]));
+    for (const name of ["send_message", "reply_to_message", "forward_message", "send_email"]) {
+      const description = byName.get(name)?.description ?? "";
+      expect(description, `${name} description`).toContain("external_sending_not_enabled");
+      expect(description, `${name} description`).toMatch(/verified account email/i);
+      expect(description, `${name} description`).toMatch(/agent inboxes/i);
+      expect(description, `${name} description`).toMatch(/recovery_url/);
+      expect(description, `${name} description`).toMatch(/do not retry/i);
+    }
+  });
+
   it("labels reply_to_message's quote_history as beta with the server default", async () => {
     const { tools } = await client.listTools();
     const byName = new Map(tools.map((t) => [t.name, t]));
@@ -567,7 +592,7 @@ describe("e2a MCP server", () => {
   // account scope sees the full surface; agent scope sees only the runtime tier.
 
   it("keeps the frozen v1 tool-name baseline sorted, unique, and callable", async () => {
-    expect(frozenToolNames).toHaveLength(78);
+    expect(frozenToolNames).toHaveLength(80);
     expect(frozenToolNames).toEqual([...new Set(frozenToolNames)].sort());
     const accountNames = new Set((await client.listTools()).tools.map((tool) => tool.name));
     for (const name of frozenToolNames) {
@@ -598,11 +623,41 @@ describe("e2a MCP server", () => {
     registerContactTools(recorder, stub);
     registerSuppressionTools(recorder, stub);
     registerMetricsTools(recorder, stub);
+    registerSendingAccessTools(recorder, stub);
     registerLegacyTools(recorder, stub);
 
-    expect(names).toHaveLength(78);
+    expect(names).toHaveLength(80);
     // Throws if any registered tool is untiered / double-tiered / phantom.
     expect(() => assertToolTiersComplete(names)).not.toThrow();
+  });
+
+  it("every registered tool is classified mutating or not (read-only drift guard)", () => {
+    // Same true registered set as the tier guard above: an unclassified tool
+    // would leave agents unable to know whether it works while the account
+    // is read-only (docs/design/account-read-only.md).
+    const names: string[] = [];
+    const recorder = {
+      registerTool: (name: string) => {
+        names.push(name);
+        return undefined;
+      },
+    } as unknown as McpServer;
+    const stub = makeStubClient();
+    registerMessageTools(recorder, stub);
+    registerAgentTools(recorder, stub);
+    registerDomainTools(recorder, stub);
+    registerReviewTools(recorder, stub);
+    registerWebhookTools(recorder, stub);
+    registerEventTools(recorder, stub);
+    registerTemplateTools(recorder, stub);
+    registerApiKeyTools(recorder, stub);
+    registerContactTools(recorder, stub);
+    registerSuppressionTools(recorder, stub);
+    registerMetricsTools(recorder, stub);
+    registerSendingAccessTools(recorder, stub);
+    registerLegacyTools(recorder, stub);
+    expect(() => assertMutatingClassificationComplete(names)).not.toThrow();
+    expect(() => assertMutatingClassificationComplete([...names, "brand_new_tool"])).toThrow(/unclassified: brand_new_tool/);
   });
 
   it("unrecognized scope falls back to the runtime tier (least privilege)", () => {
@@ -610,14 +665,14 @@ describe("e2a MCP server", () => {
     expect(toolNamesForScope("")).toBe(RUNTIME_TOOLS);
     expect(toolNamesForScope("agent")).toBe(RUNTIME_TOOLS);
     expect(RUNTIME_TOOLS.size).toBe(21);
-    expect(ADMIN_TOOLS.size).toBe(57);
-    expect(toolNamesForScope("account").size).toBe(78);
+    expect(ADMIN_TOOLS.size).toBe(59);
+    expect(toolNamesForScope("account").size).toBe(80);
   });
 
-  it("account scope exposes all 78 canonical and compatibility tools", async () => {
+  it("account scope exposes all 80 canonical and compatibility tools", async () => {
     const acct = await connect(makeStubClient({ scope: "account" }));
     const { tools } = await acct.listTools();
-    expect(tools).toHaveLength(78);
+    expect(tools).toHaveLength(80);
     const names = new Set(tools.map((tool) => tool.name));
     for (const name of ["list_reviews", "get_review", "approve_review", "reject_review"]) {
       expect(names.has(name), `account review tool ${name} should be visible`).toBe(true);
@@ -1117,6 +1172,96 @@ describe("e2a MCP server", () => {
       expect(byName.get(n)?.readOnlyHint ?? false, `${n} not read-only`).toBe(false);
     }
     expect(byName.get("get_message")?.readOnlyHint, "get_message not read-only").toBe(false);
+  });
+
+  it("the mutating flag agrees with the annotations", async () => {
+    const { tools } = await client.listTools(); // account scope → full surface
+    for (const t of tools) {
+      if (MUTATING_TOOLS.has(t.name)) {
+        expect(t.annotations?.readOnlyHint ?? false, `${t.name} mutates, so it cannot be readOnlyHint`).toBe(false);
+      }
+      if (t.annotations?.readOnlyHint === true) {
+        expect(NON_MUTATING_TOOLS.has(t.name), `${t.name} is readOnlyHint, so it must be non-mutating`).toBe(true);
+      }
+    }
+  });
+
+  it("every destructiveHint tool is mutating", async () => {
+    const { tools } = await client.listTools(); // account scope → full surface
+    for (const t of tools) {
+      if (t.annotations?.destructiveHint === true) {
+        expect(MUTATING_TOOLS.has(t.name), `${t.name} is destructiveHint, so it must be mutating`).toBe(true);
+      }
+    }
+  });
+
+  it("every tool advertises its mutating flag as _meta[\"e2a/mutating\"]", async () => {
+    const { tools } = await client.listTools(); // account scope → full surface
+    for (const t of tools) {
+      expect(t._meta?.[MUTATING_META_KEY], `${t.name} _meta["${MUTATING_META_KEY}"]`).toBe(MUTATING_TOOLS.has(t.name));
+    }
+  });
+
+  it("the mutating flag matches the HTTP methods of the /v1 operations each tool calls", async () => {
+    // Walk api/openapi.yaml for operationId → method (the committed spec is
+    // golden-tested against the live handlers, so it is the server's truth).
+    const spec = readFileSync(new URL("../../api/openapi.yaml", import.meta.url), "utf8");
+    const methodOf = new Map<string, string>();
+    let inPaths = false;
+    let method = "";
+    for (const line of spec.split("\n")) {
+      if (/^paths:\s*$/.test(line)) { inPaths = true; continue; }
+      if (inPaths && /^\S/.test(line)) inPaths = false;
+      if (!inPaths) continue;
+      const m = /^ {4}(get|put|post|patch|delete|head|options):\s*$/.exec(line);
+      if (m) { method = m[1]!.toUpperCase(); continue; }
+      const op = /^ {6}operationId:\s*(\S+)\s*$/.exec(line);
+      if (op && method) methodOf.set(op[1]!, method);
+    }
+    expect(methodOf.get("sendMessage")).toBe("POST");
+    expect(methodOf.get("listAgents")).toBe("GET");
+    // Independent derivation of the server's rule (classifyOperation):
+    // GET/HEAD read, everything else a write, except validateTemplate.
+    const isWrite = (opId: string) => {
+      const mth = methodOf.get(opId);
+      if (!mth) throw new Error(`TOOL_OPERATIONS names ${opId}, which api/openapi.yaml does not define`);
+      if (opId === "validateTemplate") return false;
+      return mth !== "GET" && mth !== "HEAD";
+    };
+    const { tools } = await client.listTools(); // account scope → full surface
+    const registered = new Set(tools.map((t) => t.name));
+    expect(new Set(Object.keys(TOOL_OPERATIONS))).toEqual(registered);
+    for (const name of registered) {
+      const ops = TOOL_OPERATIONS[name] ?? [];
+      expect(ops.length, `${name} names at least one operation`).toBeGreaterThan(0);
+      const writes = ops.some(isWrite);
+      expect(MUTATING_TOOLS.has(name), `${name} calls ${ops.join(", ")}: mutating must be ${writes}`).toBe(writes);
+    }
+  });
+
+  it("a mutating tool refused for a read-only account surfaces account_read_only", async () => {
+    // The /v1 guard is the MCP surface's enforcement point: the tool call
+    // reaches the API with the caller's credential and the 403 comes back as
+    // a non-retryable tool error an agent can branch on.
+    (stub.send as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new E2AError({
+        code: "account_read_only",
+        message:
+          "sending is paused for this account pending an abuse review, and the account is read-only: reads still work, but no changes can be made until the review is complete. Contact support to appeal.",
+        status: 403,
+        retryable: false,
+      }),
+    );
+    const res = await client.callTool({
+      name: "send_message",
+      arguments: { to: ["x@example.com"], subject: "s", text: "b" },
+    });
+    expect(res.isError).toBe(true);
+    const text = (res.content as Array<{ text: string }>)[0]?.text ?? "";
+    expect(text).toContain("[account_read_only]");
+    expect(text).toContain("read-only");
+    expect(text).not.toContain("(retryable)");
+    expect(res.structuredContent).toMatchObject({ code: "account_read_only", retryable: false, status: 403 });
   });
 
   it("send_message forwards args to client.send", async () => {
@@ -1780,6 +1925,59 @@ describe("e2a MCP server", () => {
     expect(parsed.user).toBe("owner@example.com");
     expect(parsed.scope).toBe("account");
     expect(parsed.plan).toBe("pro");
+  });
+
+  it("whoami passes through the additive sending_access object, snake_cased", async () => {
+    // Beta, additive: GET /v1/account's sending_access object is present
+    // whenever the deployment reports it; whoami must surface it verbatim
+    // (through the same REST-naming conversion every field gets) rather than
+    // stripping unknown/new fields.
+    (stub.whoami as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      user: "owner@example.com",
+      scope: "account",
+      agentAddress: undefined,
+      plan: "pro",
+      limits: { messagesPerDay: 1000 },
+      sendingAccess: {
+        enforcementApplies: true,
+        sharedExternalApproved: false,
+        paidExternalSendingEntitled: false,
+        ownerRecipientVerified: true,
+      },
+    });
+    const res = await client.callTool({ name: "whoami", arguments: {} });
+    const content = res.content as Array<{ type: string; text: string }>;
+    const parsed = JSON.parse(content[0]!.text) as Record<string, unknown>;
+    expect(parsed.sending_access).toEqual({
+      enforcement_applies: true,
+      shared_external_approved: false,
+      paid_external_sending_entitled: false,
+      owner_recipient_verified: true,
+    });
+  });
+
+  it("whoami passes through the account-trash fields, snake_cased", async () => {
+    // AccountView gained optional deletedAt/purgeAfter/restoredAt (account
+    // soft-delete). whoami is a thin pass-through of client.whoami() (GET
+    // /v1/account), so these must surface verbatim through the same
+    // REST-naming conversion every field gets, exactly like sending_access
+    // above — nothing here is mapped by hand.
+    (stub.whoami as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      user: "owner@example.com",
+      scope: "account",
+      agentAddress: undefined,
+      plan: "pro",
+      limits: { messagesPerDay: 1000 },
+      deletedAt: new Date("2026-09-01T00:00:00.000Z"),
+      purgeAfter: new Date("2026-10-01T00:00:00.000Z"),
+      restoredAt: new Date("2026-09-15T00:00:00.000Z"),
+    });
+    const res = await client.callTool({ name: "whoami", arguments: {} });
+    const content = res.content as Array<{ type: string; text: string }>;
+    const parsed = JSON.parse(content[0]!.text) as Record<string, unknown>;
+    expect(parsed.deleted_at).toBe("2026-09-01T00:00:00.000Z");
+    expect(parsed.purge_after).toBe("2026-10-01T00:00:00.000Z");
+    expect(parsed.restored_at).toBe("2026-09-15T00:00:00.000Z");
   });
 
   it("create_agent forwards email only when name omitted", async () => {
@@ -2764,6 +2962,44 @@ describe("e2a MCP server", () => {
       retryable: false,
       details,
     });
+  });
+
+  it("external_sending_not_enabled surfaces the allowed recipients and recovery_url", async () => {
+    // error.details is the raw wire object (snake_case), never renamed to the
+    // generated ExternalSendingNotEnabledDetails model's camelCase fields —
+    // structuredContent.details must pass it through byte-for-byte.
+    (stub.send as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new E2AError({
+        code: "external_sending_not_enabled",
+        message: "the account may not send to one or more of the recipients",
+        status: 403,
+        requestId: "req_esa1",
+        details: {
+          allowed_recipients: ["verified_owner_email", "same_account_agents"],
+          recovery_url: "https://e2a.dev/dashboard/sending-access",
+        },
+        retryable: false,
+      }),
+    );
+    const res = await client.callTool({
+      name: "send_message",
+      arguments: { to: ["outsider@example.net"], subject: "s", text: "b" },
+    });
+    expect(res.isError).toBe(true);
+    expect(res.structuredContent).toEqual({
+      code: "external_sending_not_enabled",
+      status: 403,
+      request_id: "req_esa1",
+      retryable: false,
+      details: {
+        allowed_recipients: ["verified_owner_email", "same_account_agents"],
+        recovery_url: "https://e2a.dev/dashboard/sending-access",
+      },
+    });
+    const text = (res.content as Array<{ text: string }>)[0]?.text ?? "";
+    expect(text).toBe(
+      "e2a error [external_sending_not_enabled]: the account may not send to one or more of the recipients",
+    );
   });
 
   it("a retryable API error carries retryable + retry_after_seconds in structuredContent", async () => {

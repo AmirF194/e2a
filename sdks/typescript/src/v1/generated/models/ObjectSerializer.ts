@@ -1,5 +1,6 @@
 export * from '../models/APIKeyExportEntry.js';
 export * from '../models/APIKeyView.js';
+export * from '../models/AccountDailyLimit.js';
 export * from '../models/AccountMetricsView.js';
 export * from '../models/AccountUserView.js';
 export * from '../models/AccountView.js';
@@ -64,6 +65,7 @@ export * from '../models/ErrorBody.js';
 export * from '../models/ErrorEnvelope.js';
 export * from '../models/EventEnvelope.js';
 export * from '../models/EventView.js';
+export * from '../models/ExternalSendingNotEnabledDetails.js';
 export * from '../models/FieldError.js';
 export * from '../models/ForwardRequest.js';
 export * from '../models/ForwardRequestReplyTo.js';
@@ -131,6 +133,9 @@ export * from '../models/RotateSecretResponse.js';
 export * from '../models/SPFResult.js';
 export * from '../models/SendEmailRequest.js';
 export * from '../models/SendResultView.js';
+export * from '../models/SendingAccessRequestInput.js';
+export * from '../models/SendingAccessRequestView.js';
+export * from '../models/SendingAccessView.js';
 export * from '../models/SendingRampView.js';
 export * from '../models/StarterTemplateDetailView.js';
 export * from '../models/StarterTemplateVariableView.js';
@@ -168,6 +173,7 @@ export * from '../models/WebhookView.js';
 
 import { APIKeyExportEntry } from '../models/APIKeyExportEntry.js';
 import { APIKeyView } from '../models/APIKeyView.js';
+import { AccountDailyLimit } from '../models/AccountDailyLimit.js';
 import { AccountMetricsView } from '../models/AccountMetricsView.js';
 import { AccountUserView } from '../models/AccountUserView.js';
 import { AccountView } from '../models/AccountView.js';
@@ -232,6 +238,7 @@ import { ErrorBody } from '../models/ErrorBody.js';
 import { ErrorEnvelope } from '../models/ErrorEnvelope.js';
 import { EventEnvelope } from '../models/EventEnvelope.js';
 import { EventView } from '../models/EventView.js';
+import { ExternalSendingNotEnabledDetails } from '../models/ExternalSendingNotEnabledDetails.js';
 import { FieldError } from '../models/FieldError.js';
 import { ForwardRequest } from '../models/ForwardRequest.js';
 import { HoldReasonView } from '../models/HoldReasonView.js';
@@ -298,6 +305,9 @@ import { RotateSecretResponse } from '../models/RotateSecretResponse.js';
 import { SPFResult } from '../models/SPFResult.js';
 import { SendEmailRequest } from '../models/SendEmailRequest.js';
 import { SendResultView } from '../models/SendResultView.js';
+import { SendingAccessRequestInput } from '../models/SendingAccessRequestInput.js';
+import { SendingAccessRequestView } from '../models/SendingAccessRequestView.js';
+import { SendingAccessView } from '../models/SendingAccessView.js';
 import { SendingRampView } from '../models/SendingRampView.js';
 import { StarterTemplateDetailView } from '../models/StarterTemplateDetailView.js';
 import { StarterTemplateVariableView } from '../models/StarterTemplateVariableView.js';
@@ -376,6 +386,7 @@ let enumsMap: Set<string> = new Set<string>([
 let typeMap: {[index: string]: any} = {
     "APIKeyExportEntry": APIKeyExportEntry,
     "APIKeyView": APIKeyView,
+    "AccountDailyLimit": AccountDailyLimit,
     "AccountMetricsView": AccountMetricsView,
     "AccountUserView": AccountUserView,
     "AccountView": AccountView,
@@ -440,6 +451,7 @@ let typeMap: {[index: string]: any} = {
     "ErrorEnvelope": ErrorEnvelope,
     "EventEnvelope": EventEnvelope,
     "EventView": EventView,
+    "ExternalSendingNotEnabledDetails": ExternalSendingNotEnabledDetails,
     "FieldError": FieldError,
     "ForwardRequest": ForwardRequest,
     "HoldReasonView": HoldReasonView,
@@ -506,6 +518,9 @@ let typeMap: {[index: string]: any} = {
     "SPFResult": SPFResult,
     "SendEmailRequest": SendEmailRequest,
     "SendResultView": SendResultView,
+    "SendingAccessRequestInput": SendingAccessRequestInput,
+    "SendingAccessRequestView": SendingAccessRequestView,
+    "SendingAccessView": SendingAccessView,
     "SendingRampView": SendingRampView,
     "StarterTemplateDetailView": StarterTemplateDetailView,
     "StarterTemplateVariableView": StarterTemplateVariableView,

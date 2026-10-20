@@ -995,7 +995,7 @@ scenarios:
       immediately rather than waiting for the future instant.
     setup:
       - register_agent:
-          email: scheduled-contract-{scenario_token}@agents.e2a.dev
+          email: scheduled-contract-{scenario_token}@agents.localhost
     steps:
       - id: schedule_send
         action: request
@@ -1084,7 +1084,7 @@ scenarios:
       through with delivery_status=accepted.
     setup:
       - register_agent:
-          email: sched-hold-{scenario_token}@agents.e2a.dev
+          email: sched-hold-{scenario_token}@agents.localhost
     steps:
       - id: enable_outbound_review
         # Empty-allowlist outbound review gate → every recipient is held for review.
@@ -1176,7 +1176,7 @@ scenarios:
       API alone cannot seed one; runners without store access skip this).
     setup:
       - register_agent:
-          email: scheduled-reply-{scenario_token}@agents.e2a.dev
+          email: scheduled-reply-{scenario_token}@agents.localhost
       - inject_message:
           agent_email: "{agent_email}"
           from: alice@example.net
@@ -1263,7 +1263,7 @@ scenarios:
       runners without store access skip this).
     setup:
       - register_agent:
-          email: scheduled-forward-{scenario_token}@agents.e2a.dev
+          email: scheduled-forward-{scenario_token}@agents.localhost
       - inject_message:
           agent_email: "{agent_email}"
           from: alice@example.net
@@ -1353,7 +1353,7 @@ scenarios:
       scheduled_reply_fields; runners without store access skip this).
     setup:
       - register_agent:
-          email: scheduled-validation-{scenario_token}@agents.e2a.dev
+          email: scheduled-validation-{scenario_token}@agents.localhost
       - inject_message:
           agent_email: "{agent_email}"
           from: alice@example.net
@@ -1453,7 +1453,7 @@ scenarios:
       runners alike instead of being store-seeded and skipped in TS/Python.
     setup:
       - register_agent:
-          email: bot-reply-to-{scenario_token}@agents.e2a.dev
+          email: bot-reply-to-{scenario_token}@agents.localhost
     steps:
       - id: send_reply_to_array
         action: request
@@ -2279,11 +2279,11 @@ scenarios:
         path: /v1/agents
         auth_override: "Bearer {capped_api_key}"
         body:
-          email: capped-bot-{scenario_token}@agents.e2a.dev
+          email: capped-bot-{scenario_token}@agents.localhost
         expect:
           status: 201
           body_match:
-            email: capped-bot-{scenario_token}@agents.e2a.dev
+            email: capped-bot-{scenario_token}@agents.localhost
 
       - id: second_agent_fits_the_cap
         action: request
@@ -2291,7 +2291,7 @@ scenarios:
         path: /v1/agents
         auth_override: "Bearer {capped_api_key}"
         body:
-          email: capped-bot-2-{scenario_token}@agents.e2a.dev
+          email: capped-bot-2-{scenario_token}@agents.localhost
         expect:
           status: 201
 
@@ -2301,7 +2301,7 @@ scenarios:
         path: /v1/agents
         auth_override: "Bearer {capped_api_key}"
         body:
-          email: capped-bot-3-{scenario_token}@agents.e2a.dev
+          email: capped-bot-3-{scenario_token}@agents.localhost
         expect:
           status: 402
           body_match:
@@ -2317,7 +2317,7 @@ scenarios:
       - id: agent_slot_frees_on_delete
         action: request
         method: DELETE
-        path: /v1/agents/capped-bot-{scenario_token}@agents.e2a.dev?confirm=DELETE&permanent=true
+        path: /v1/agents/capped-bot-{scenario_token}@agents.localhost?confirm=DELETE&permanent=true
         auth_override: "Bearer {capped_api_key}"
         expect:
           status: 200
@@ -2330,7 +2330,7 @@ scenarios:
         path: /v1/agents
         auth_override: "Bearer {capped_api_key}"
         body:
-          email: capped-bot-3-{scenario_token}@agents.e2a.dev
+          email: capped-bot-3-{scenario_token}@agents.localhost
         expect:
           status: 201
 
@@ -2349,19 +2349,19 @@ scenarios:
       - id: delete_agent_1
         action: request
         method: DELETE
-        path: /v1/agents/capped-bot-{scenario_token}@agents.e2a.dev?confirm=DELETE&permanent=true
+        path: /v1/agents/capped-bot-{scenario_token}@agents.localhost?confirm=DELETE&permanent=true
         auth_override: "Bearer {capped_api_key}"
 
       - id: delete_agent_2
         action: request
         method: DELETE
-        path: /v1/agents/capped-bot-2-{scenario_token}@agents.e2a.dev?confirm=DELETE&permanent=true
+        path: /v1/agents/capped-bot-2-{scenario_token}@agents.localhost?confirm=DELETE&permanent=true
         auth_override: "Bearer {capped_api_key}"
 
       - id: delete_agent_3
         action: request
         method: DELETE
-        path: /v1/agents/capped-bot-3-{scenario_token}@agents.e2a.dev?confirm=DELETE&permanent=true
+        path: /v1/agents/capped-bot-3-{scenario_token}@agents.localhost?confirm=DELETE&permanent=true
         auth_override: "Bearer {capped_api_key}"
 
       - id: delete_domain
@@ -2407,7 +2407,7 @@ scenarios:
         path: /v1/agents
         auth_override: "Bearer {overcap_api_key}"
         body:
-          email: overcap-blocked-bot-{scenario_token}@agents.e2a.dev
+          email: overcap-blocked-bot-{scenario_token}@agents.localhost
         expect:
           status: 402
           body_match:
@@ -2878,7 +2878,7 @@ scenarios:
       scenarios).
     setup:
       - register_agent:
-          email: quote-history-{scenario_token}@agents.e2a.dev
+          email: quote-history-{scenario_token}@agents.localhost
       - inject_message:
           agent_email: "{agent_email}"
           from: alice@example.net
@@ -3273,3 +3273,635 @@ scenarios:
           body_match:
             deleted: true
             domain: acctmetrics-contract.test.dev
+
+  - name: external_sending_access_restricted_account
+    description: >
+      External sending access over the wire. The contract server enforces the
+      control with a far-future cohort cutoff and the default unlock set (all
+      three, reported as available_unlocks), so ONLY the restricted account
+      ({restricted_api_key}) is in the cohort. It may send to its verified
+      owner email and its own live agents; any external To, Cc or Bcc refuses
+      the WHOLE send with 403 external_sending_not_enabled and nothing is
+      queued. The primary account is outside the cohort and unaffected. Every
+      refused send persists nothing; the one accepted send targets the
+      account's own sibling agent.
+    steps:
+      - id: restricted_account_reports_enforcement
+        action: request
+        method: GET
+        path: /v1/account
+        auth_override: "Bearer {restricted_api_key}"
+        expect:
+          status: 200
+          body_match:
+            "sending_access.enforcement_applies": true
+            "sending_access.shared_external_approved": false
+            "sending_access.paid_external_sending_entitled": false
+            "sending_access.owner_recipient_verified": true
+            # The contract server leaves `unlocks` unset: the default is
+            # every unlock, reported in canonical order.
+            "sending_access.available_unlocks.length": 3
+            "sending_access.available_unlocks[0]": operator_approval
+            "sending_access.available_unlocks[1]": verified_domain
+            "sending_access.available_unlocks[2]": paid_entitlement
+
+      - id: primary_account_is_outside_the_cohort
+        action: request
+        method: GET
+        path: /v1/account
+        expect:
+          status: 200
+          body_match:
+            "sending_access.enforcement_applies": false
+
+      - id: external_to_is_refused
+        action: request
+        method: POST
+        path: /v1/agents/restricted-bot@agents.localhost/messages
+        auth_override: "Bearer {restricted_api_key}"
+        headers:
+          Idempotency-Key: esa-external-{scenario_token}
+        body:
+          to: ["customer-{scenario_token}@example.net"]
+          subject: probe
+          text: probe
+        expect:
+          status: 403
+          body_contains: [error]
+          body_match:
+            "error.code": external_sending_not_enabled
+
+      # A refusal is not cached under the idempotency key: the same keyed
+      # request is judged afresh and refused the same way.
+      - id: keyed_refusal_is_not_replayed_as_success
+        action: request
+        method: POST
+        path: /v1/agents/restricted-bot@agents.localhost/messages
+        auth_override: "Bearer {restricted_api_key}"
+        headers:
+          Idempotency-Key: esa-external-{scenario_token}
+        body:
+          to: ["customer-{scenario_token}@example.net"]
+          subject: probe
+          text: probe
+        expect:
+          status: 403
+          body_match:
+            "error.code": external_sending_not_enabled
+
+      - id: hidden_bcc_refuses_the_whole_send
+        action: request
+        method: POST
+        path: /v1/agents/restricted-bot@agents.localhost/messages
+        auth_override: "Bearer {restricted_api_key}"
+        body:
+          to: ["restricted-peer@agents.localhost"]
+          bcc: ["hidden-{scenario_token}@example.net"]
+          subject: probe
+          text: probe
+        expect:
+          status: 403
+          body_match:
+            "error.code": external_sending_not_enabled
+
+      - id: external_cc_refuses_the_whole_send
+        action: request
+        method: POST
+        path: /v1/agents/restricted-bot@agents.localhost/messages
+        auth_override: "Bearer {restricted_api_key}"
+        body:
+          to: ["restricted-owner@test.dev"]
+          cc: ["copied-{scenario_token}@example.net"]
+          subject: probe
+          text: probe
+        expect:
+          status: 403
+          body_match:
+            "error.code": external_sending_not_enabled
+
+      # Tenant isolation: another account cannot send as the restricted
+      # account's agent at all.
+      - id: other_account_cannot_use_the_restricted_agent
+        action: request
+        method: POST
+        path: /v1/agents/restricted-bot@agents.localhost/messages
+        body:
+          to: ["restricted-peer@agents.localhost"]
+          subject: probe
+          text: probe
+        expect:
+          status: 404
+
+      - id: same_account_agent_is_allowed
+        action: request
+        method: POST
+        path: /v1/agents/restricted-bot@agents.localhost/messages
+        auth_override: "Bearer {restricted_api_key}"
+        body:
+          to: ["restricted-peer@agents.localhost"]
+          subject: probe {scenario_token}
+          text: probe
+        expect:
+          status: 202
+          body_match:
+            status: accepted
+
+  - name: external_sending_access_request_intake
+    description: >
+      The authenticated request form behind the dashboard recovery flow. The
+      account is bound from the credential; submitting while a request is
+      pending returns that request (200) instead of creating another (201);
+      bounds are validated; filing never grants access. Runs as the
+      restricted account ({restricted_api_key}), which no other scenario
+      files requests for. Requests are private support history with no
+      customer delete, so the pending request remains on that dedicated
+      account after the run.
+    steps:
+      - id: invalid_volume_is_refused
+        action: request
+        method: POST
+        path: /v1/account/sending-access/request
+        auth_override: "Bearer {restricted_api_key}"
+        body:
+          use_case: contract probe
+          recipients: our own customers
+          expected_daily_volume: 0
+        expect:
+          status: 422
+          body_match:
+            "error.code": invalid_request
+
+      - id: file_request
+        action: request
+        method: POST
+        path: /v1/account/sending-access/request
+        auth_override: "Bearer {restricted_api_key}"
+        body:
+          use_case: contract probe
+          recipients: our own customers
+          expected_daily_volume: 10
+        expect:
+          status: 201
+          body_match:
+            state: pending
+            expected_daily_volume: 10
+        capture:
+          sending_access_request_id: id
+
+      - id: resubmit_returns_the_pending_request
+        action: request
+        method: POST
+        path: /v1/account/sending-access/request
+        auth_override: "Bearer {restricted_api_key}"
+        body:
+          use_case: a different reason
+          recipients: someone else
+          expected_daily_volume: 99
+        expect:
+          status: 200
+          body_match:
+            id: "{sending_access_request_id}"
+            state: pending
+            use_case: contract probe
+
+      - id: latest_request_is_readable
+        action: request
+        method: GET
+        path: /v1/account/sending-access/request
+        auth_override: "Bearer {restricted_api_key}"
+        expect:
+          status: 200
+          body_match:
+            id: "{sending_access_request_id}"
+            state: pending
+
+      - id: filing_does_not_grant_access
+        action: request
+        method: GET
+        path: /v1/account
+        auth_override: "Bearer {restricted_api_key}"
+        expect:
+          status: 200
+          body_match:
+            "sending_access.shared_external_approved": false
+
+  # ── Account deletion (docs/design/account-soft-deletion.md §4.8) ──
+  # Each scenario runs as a throwaway account the contract server seeds only
+  # to be deleted ({disposable_trash_api_key} / {disposable_erase_api_key});
+  # no other scenario may use them, and each is deleted exactly once per run.
+  - name: account_delete_trash_receipt
+    description: >
+      DELETE /v1/account defaults to the trash: the receipt says mode=trash with
+      a purge_after, reports zero messages deleted and user_deleted=false, and
+      the key it was called with stops authenticating at once (trash revokes
+      every API key). The trashed row is restorable only through the
+      dashboard, so there is nothing for the API to clean up.
+    auth_override: "Bearer {disposable_trash_api_key}"
+    steps:
+      - id: trash_account
+        action: request
+        method: DELETE
+        path: /v1/account?confirm=DELETE
+        expect:
+          status: 200
+          body_contains: [purge_after]
+          body_match:
+            deleted: true
+            mode: trash
+            user_deleted: false
+            messages_deleted: 0
+
+      - id: revoked_key_is_401
+        action: request
+        method: GET
+        path: /v1/account
+        expect:
+          status: 401
+          body_match:
+            "error.code": unauthorized
+
+  - name: account_delete_permanent_receipt
+    description: >
+      DELETE /v1/account?permanent=true erases the account immediately: the
+      receipt says mode=permanent with user_deleted=true and carries no
+      purge_after, and the key is gone.
+    auth_override: "Bearer {disposable_erase_api_key}"
+    steps:
+      - id: erase_account
+        action: request
+        method: DELETE
+        path: /v1/account?confirm=DELETE&permanent=true
+        expect:
+          status: 200
+          body_excludes: [purge_after]
+          body_match:
+            deleted: true
+            mode: permanent
+            user_deleted: true
+
+      - id: erased_key_is_401
+        action: request
+        method: GET
+        path: /v1/account
+        expect:
+          status: 401
+          body_match:
+            "error.code": unauthorized
+
+  # Runs as {disposable_deferred_erase_api_key}: a throwaway account the
+  # contract server seeds with a provider-accepted send to an external
+  # recipient an hour ago. Deleted exactly once per run.
+  - name: account_delete_permanent_deferred_for_recent_sender
+    description: >
+      DELETE /v1/account?permanent=true on an account that emailed an external
+      recipient recently is deferred (docs/design/account-soft-deletion.md,
+      "Deferred erase for recent senders"): a 200 trash receipt with
+      erase_deferred=true, a purge_after and a message, user_deleted=false —
+      and the key stops authenticating at once, as for any trash.
+    auth_override: "Bearer {disposable_deferred_erase_api_key}"
+    steps:
+      - id: erase_is_deferred
+        action: request
+        method: DELETE
+        path: /v1/account?confirm=DELETE&permanent=true
+        expect:
+          status: 200
+          body_contains: [purge_after, message]
+          body_match:
+            deleted: true
+            mode: trash
+            erase_deferred: true
+            user_deleted: false
+            messages_deleted: 0
+
+      - id: deferred_key_is_401
+        action: request
+        method: GET
+        path: /v1/account
+        expect:
+          status: 401
+          body_match:
+            "error.code": unauthorized
+
+  # Runs as {deferred_purge_api_key}: an account whose one agent has a
+  # provider-accepted send to an external recipient an hour ago. The
+  # scenario restores what it trashes, so it is re-runnable.
+  - name: permanent_agent_and_message_delete_deferred_for_recent_sender
+    description: >
+      Permanent deletion of a message sent to an external recipient recently,
+      and of the agent that sent it, is deferred to the trash
+      (docs/design/account-soft-deletion.md, "Deferred erase for recent
+      senders"): each answers 200 with erase_deferred=true, a purge_after and
+      a message, nothing is deleted, and both can be restored.
+    auth_override: "Bearer {deferred_purge_api_key}"
+    steps:
+      - id: trash_message
+        action: request
+        method: DELETE
+        path: /v1/agents/deferred-purge-bot@agents.localhost/messages/msg_contract_deferred_purge
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+            id: msg_contract_deferred_purge
+
+      - id: message_purge_is_deferred
+        action: request
+        method: DELETE
+        path: /v1/agents/deferred-purge-bot@agents.localhost/messages/msg_contract_deferred_purge?permanent=true&confirm=DELETE
+        expect:
+          status: 200
+          body_contains: [purge_after, message]
+          body_match:
+            deleted: true
+            erase_deferred: true
+
+      - id: restore_message
+        action: request
+        method: POST
+        path: /v1/agents/deferred-purge-bot@agents.localhost/messages/msg_contract_deferred_purge/restore
+        expect:
+          status: 200
+          body_match:
+            id: msg_contract_deferred_purge
+
+      - id: agent_purge_is_deferred
+        action: request
+        method: DELETE
+        path: /v1/agents/deferred-purge-bot@agents.localhost?confirm=DELETE&permanent=true
+        expect:
+          status: 200
+          body_contains: [purge_after, message]
+          body_match:
+            deleted: true
+            email: deferred-purge-bot@agents.localhost
+            erase_deferred: true
+            messages_deleted: 0
+
+      - id: restore_agent
+        action: request
+        method: POST
+        path: /v1/agents/deferred-purge-bot@agents.localhost/restore
+        expect:
+          status: 200
+          body_match:
+            email: deferred-purge-bot@agents.localhost
+
+  # ── Read-only accounts (docs/design/account-read-only.md) ──
+  # Runs as the contract server's abuse-paused account ({readonly_api_key}),
+  # which it seeds read-only. The scenario ends by moving that account to the
+  # trash, so it runs once per server and no other scenario may use it.
+  - name: account_read_only_refuses_writes
+    description: >
+      An account whose sending is paused with pause class abuse is read-only.
+      GET /v1/account reports read_only:true and every read keeps working; one
+      representative write per resource family is refused with 403
+      account_read_only (reason text never shown); the permanent erase stays
+      409 erase_held; and moving the account to the trash still works (mode
+      trash), after which the key stops authenticating.
+    auth_override: "Bearer {readonly_api_key}"
+    steps:
+      - id: account_reports_read_only
+        action: request
+        method: GET
+        path: /v1/account
+        expect:
+          status: 200
+          body_match:
+            read_only: true
+
+      - id: agents_list_is_readable
+        action: request
+        method: GET
+        path: /v1/agents
+        expect:
+          status: 200
+          body_contains: [items]
+
+      - id: agent_is_readable
+        action: request
+        method: GET
+        path: /v1/agents/readonly-bot@agents.localhost
+        expect:
+          status: 200
+          body_match:
+            email: readonly-bot@agents.localhost
+
+      - id: messages_are_readable
+        action: request
+        method: GET
+        path: /v1/agents/readonly-bot@agents.localhost/messages
+        expect:
+          status: 200
+
+      - id: export_is_readable
+        action: request
+        method: GET
+        path: /v1/account/export
+        expect:
+          status: 200
+
+      - id: agent_create_is_refused
+        action: request
+        method: POST
+        path: /v1/agents
+        body:
+          email: ro-{scenario_token}@agents.localhost
+        expect:
+          status: 403
+          response_excludes: [contract read-only fixture]
+          body_match:
+            "error.code": account_read_only
+
+      - id: agent_rename_is_refused
+        action: request
+        method: PATCH
+        path: /v1/agents/readonly-bot@agents.localhost
+        body:
+          name: Brand Support
+        expect:
+          status: 403
+          body_match:
+            "error.code": account_read_only
+
+      - id: agent_trash_is_refused
+        action: request
+        method: DELETE
+        path: /v1/agents/readonly-bot@agents.localhost?confirm=DELETE
+        expect:
+          status: 403
+          body_match:
+            "error.code": account_read_only
+
+      - id: send_is_refused
+        action: request
+        method: POST
+        path: /v1/agents/readonly-bot@agents.localhost/messages
+        headers:
+          Idempotency-Key: ro-send-{scenario_token}
+        body:
+          to: ["customer-{scenario_token}@example.net"]
+          subject: probe
+          text: probe
+        expect:
+          status: 403
+          body_match:
+            "error.code": account_read_only
+
+      - id: domain_register_is_refused
+        action: request
+        method: POST
+        path: /v1/domains
+        body:
+          domain: ro-{scenario_token}.example.test
+        expect:
+          status: 403
+          body_match:
+            "error.code": account_read_only
+
+      - id: api_key_create_is_refused
+        action: request
+        method: POST
+        path: /v1/account/api-keys
+        body:
+          name: ro-{scenario_token}
+        expect:
+          status: 403
+          body_match:
+            "error.code": account_read_only
+
+      - id: webhook_create_is_refused
+        action: request
+        method: POST
+        path: /v1/webhooks
+        body:
+          url: https://hooks.example.test/{scenario_token}
+          events: [email.received]
+        expect:
+          status: 403
+          body_match:
+            "error.code": account_read_only
+
+      - id: contact_create_is_refused
+        action: request
+        method: POST
+        path: /v1/contacts
+        body:
+          address: ro-{scenario_token}@example.net
+        expect:
+          status: 403
+          body_match:
+            "error.code": account_read_only
+
+      - id: template_create_is_refused
+        action: request
+        method: POST
+        path: /v1/templates
+        body:
+          name: ro-{scenario_token}
+          subject: s
+          body: b
+        expect:
+          status: 403
+          body_match:
+            "error.code": account_read_only
+
+      - id: suppression_create_is_refused
+        action: request
+        method: POST
+        path: /v1/agents/readonly-bot@agents.localhost/suppressions
+        body:
+          address: ro-{scenario_token}@example.net
+        expect:
+          status: 403
+          body_match:
+            "error.code": account_read_only
+
+      - id: sending_access_request_is_refused
+        action: request
+        method: POST
+        path: /v1/account/sending-access/request
+        body:
+          use_case: contract probe
+        expect:
+          status: 403
+          body_match:
+            "error.code": account_read_only
+
+      - id: permanent_erase_stays_held
+        action: request
+        method: DELETE
+        path: /v1/account?confirm=DELETE&permanent=true
+        expect:
+          status: 409
+          body_match:
+            "error.code": erase_held
+
+      - id: account_trash_still_works
+        action: request
+        method: DELETE
+        path: /v1/account?confirm=DELETE
+        expect:
+          status: 200
+          body_contains: [purge_after]
+          body_match:
+            deleted: true
+            mode: trash
+
+      - id: trashed_key_is_401
+        action: request
+        method: GET
+        path: /v1/account
+        expect:
+          status: 401
+          body_match:
+            "error.code": unauthorized
+
+  - name: account_daily_trust_limit
+    description: >
+      Account daily limits count only external recipients. The real contract
+      service has the ladder enabled; workers are stopped so no external mail
+      is submitted. An immediate 21-recipient send exceeds the initial 20
+      allowance and persists nothing. The same scenario runs in Go, TS and Python.
+    setup:
+      - register_agent:
+          email: "trust-{scenario_token}@agents.localhost"
+    steps:
+      - id: account_reports_daily_allowance
+        action: request
+        method: GET
+        path: /v1/account
+        expect:
+          status: 200
+          body_match:
+            "daily_limit.limit": 20
+            "daily_limit.used": 0
+            "daily_limit.shared_limit": 20
+            "daily_limit.shared_used": 0
+            "daily_limit.clean_active_days": 0
+          body_contains: ["daily_limit"]
+        capture:
+          daily_reset: daily_limit.resets_at
+      - id: daily_refusal_includes_snapshot
+        action: request
+        method: POST
+        path: /v1/agents/trust-{scenario_token}@agents.localhost/messages
+        body:
+          to: ["recipient-0@example.test", "recipient-1@example.test", "recipient-2@example.test", "recipient-3@example.test", "recipient-4@example.test", "recipient-5@example.test", "recipient-6@example.test", "recipient-7@example.test", "recipient-8@example.test", "recipient-9@example.test", "recipient-10@example.test", "recipient-11@example.test", "recipient-12@example.test", "recipient-13@example.test", "recipient-14@example.test", "recipient-15@example.test", "recipient-16@example.test", "recipient-17@example.test", "recipient-18@example.test", "recipient-19@example.test", "recipient-20@example.test"]
+          subject: Synthetic daily limit probe
+          text: This request must not queue mail.
+        expect:
+          status: 402
+          body_match:
+            "error.code": limit_exceeded
+            "error.details.resource": messages_day
+            "error.details.daily_limit.limit": 20
+            "error.details.daily_limit.used": 0
+            "error.details.daily_limit.resets_at": "{daily_reset}"
+    cleanup:
+      - id: delete_trust_agent
+        action: request
+        method: DELETE
+        path: /v1/agents/trust-{scenario_token}@agents.localhost?confirm=DELETE&permanent=true
+        expect:
+          status: 200

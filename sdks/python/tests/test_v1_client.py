@@ -20,6 +20,7 @@ from e2a.v1.errors import (
     E2AError,
     E2ANotFoundError,
     E2APermissionError,
+    E2ARateLimitError,
     E2AServerError,
     E2AValidationError,
 )
@@ -449,6 +450,70 @@ async def test_agents_delete_sends_confirm_and_returns_receipt(httpx_mock):
     assert res.deleted is True
     assert res.email == "bot@test.dev"
     assert res.messages_deleted == 12
+
+
+@pytest.mark.anyio
+async def test_account_delete_trashes_by_default(httpx_mock):
+    httpx_mock.add_response(
+        json={
+            "deleted": True,
+            "mode": "trash",
+            "purge_after": "2026-10-26T00:00:00Z",
+            "messages_deleted": 0,
+            "usage_events_deleted": 0,
+            "usage_summaries_deleted": 0,
+            "agents_deleted": 3,
+            "domains_deleted": 1,
+            "api_keys_deleted": 2,
+            "sessions_deleted": 1,
+            "agent_suppressions_deleted": 0,
+            "agent_unsubscribe_tokens_deleted": 0,
+            "user_deleted": False,
+        }
+    )
+    async with _client() as c:
+        res = await c.account.delete()
+    req = httpx_mock.get_requests()[-1]
+    assert req.method == "DELETE"
+    assert "/v1/account" in str(req.url)
+    assert "confirm=DELETE" in str(req.url)
+    # The trash path is reversible, so `permanent` is omitted entirely.
+    assert "permanent" not in req.url.params
+    assert res.deleted is True
+    assert res.mode == "trash"
+    assert res.purge_after is not None
+    assert res.messages_deleted == 0
+    assert res.user_deleted is False
+
+
+@pytest.mark.anyio
+async def test_account_delete_permanent_sends_confirm_and_permanent(httpx_mock):
+    httpx_mock.add_response(
+        json={
+            "deleted": True,
+            "mode": "permanent",
+            "messages_deleted": 42,
+            "usage_events_deleted": 5,
+            "usage_summaries_deleted": 1,
+            "agents_deleted": 3,
+            "domains_deleted": 1,
+            "api_keys_deleted": 2,
+            "sessions_deleted": 1,
+            "agent_suppressions_deleted": 0,
+            "agent_unsubscribe_tokens_deleted": 0,
+            "user_deleted": True,
+        }
+    )
+    async with _client() as c:
+        res = await c.account.delete(permanent=True)
+    req = httpx_mock.get_requests()[-1]
+    assert req.method == "DELETE"
+    assert req.url.params["permanent"] == "true"
+    # The typed call is the confirmation; the SDK supplies the raw-API guard.
+    assert "confirm=DELETE" in str(req.url)
+    assert res.mode == "permanent"
+    assert res.user_deleted is True
+    assert res.purge_after is None
 
 
 @pytest.mark.anyio
@@ -1882,3 +1947,234 @@ async def test_outreach_exposes_etag_and_sends_if_match(httpx_mock):
             {"stage": "touch2"}, if_match=etag,
         )
     assert httpx_mock.get_requests()[-1].headers["If-Match"] == '"outreach-v1"'
+
+
+# ── account: sending access (beta) ────────────────────────────────────────
+
+
+def test_sending_access_view_decodes_available_unlocks():
+    from e2a.v1.generated.models.sending_access_view import SendingAccessView
+
+    view = SendingAccessView.from_dict(
+        {
+            "enforcement_applies": True,
+            "shared_external_approved": False,
+            "paid_external_sending_entitled": True,
+            "owner_recipient_verified": True,
+            "available_unlocks": ["operator_approval"],
+        }
+    )
+    assert view.available_unlocks == ["operator_approval"]
+    # A server that predates the field omits it; the object still decodes.
+    legacy = SendingAccessView.from_dict(
+        {
+            "enforcement_applies": True,
+            "shared_external_approved": False,
+            "paid_external_sending_entitled": False,
+            "owner_recipient_verified": False,
+        }
+    )
+    assert legacy.available_unlocks is None
+
+
+@pytest.mark.anyio
+async def test_get_sending_access_request_reads_the_endpoint(httpx_mock):
+    httpx_mock.add_response(
+        json={
+            "id": "sar_1",
+            "state": "pending",
+            "use_case": "notify our customers",
+            "recipients": "our own customers who signed up",
+            "expected_daily_volume": 500,
+            "created_at": "2026-07-01T00:00:00Z",
+        }
+    )
+    async with _client() as c:
+        req = await c.account.get_sending_access_request()
+    assert req.id == "sar_1"
+    assert req.state == "pending"
+    assert req.expected_daily_volume == 500
+    call = httpx_mock.get_requests()[-1]
+    assert call.method == "GET"
+    assert "/v1/account/sending-access/request" in str(call.url)
+
+
+@pytest.mark.anyio
+async def test_get_sending_access_request_404_maps_to_not_found(httpx_mock):
+    httpx_mock.add_response(
+        status_code=404,
+        json={"error": {"code": "not_found", "message": "no sending access request has been filed"}},
+    )
+    async with _client() as c:
+        with pytest.raises(E2ANotFoundError) as ei:
+            await c.account.get_sending_access_request()
+    assert ei.value.code == "not_found"
+
+
+@pytest.mark.anyio
+async def test_request_sending_access_posts_body_and_returns_the_created_view(httpx_mock):
+    httpx_mock.add_response(
+        status_code=201,
+        json={
+            "id": "sar_2",
+            "state": "pending",
+            "use_case": "notify our customers",
+            "recipients": "our own customers who signed up",
+            "expected_daily_volume": 500,
+            "created_at": "2026-07-01T00:00:00Z",
+        },
+    )
+    async with _client() as c:
+        req = await c.account.request_sending_access(
+            use_case="notify our customers",
+            recipients="our own customers who signed up",
+            expected_daily_volume=500,
+        )
+    assert req.id == "sar_2"
+    assert req.state == "pending"
+    call = httpx_mock.get_requests()[-1]
+    assert call.method == "POST"
+    assert "/v1/account/sending-access/request" in str(call.url)
+    sent = json.loads(call.content)
+    assert sent == {
+        "use_case": "notify our customers",
+        "recipients": "our own customers who signed up",
+        "expected_daily_volume": 500,
+    }
+
+
+@pytest.mark.anyio
+async def test_request_sending_access_resubmit_200_returns_the_pending_request(httpx_mock):
+    # A resubmit while a request is pending answers 200 with the EXISTING
+    # request (the spec declares both 200 and 201). It must decode straight
+    # to the view in one call — no follow-up read.
+    httpx_mock.add_response(
+        status_code=200,
+        json={
+            "id": "sar_3",
+            "state": "pending",
+            "use_case": "the original reason",
+            "recipients": "our customers",
+            "expected_daily_volume": 10,
+            "created_at": "2026-07-01T00:00:00Z",
+        },
+    )
+    async with _client() as c:
+        req = await c.account.request_sending_access(
+            use_case="a different reason", recipients="someone else", expected_daily_volume=99,
+        )
+    assert req.id == "sar_3"
+    assert req.state == "pending"
+    assert req.use_case == "the original reason"
+    requests = httpx_mock.get_requests()
+    assert len(requests) == 1
+    assert requests[0].method == "POST"
+
+
+@pytest.mark.anyio
+async def test_request_sending_access_rate_limited_maps_to_rate_limit_error(httpx_mock):
+    httpx_mock.add_response(
+        status_code=429,
+        json={"error": {"code": "rate_limited", "message": "too many sending access requests"}},
+        headers={"Retry-After": "60"},
+    )
+    async with _client() as c:
+        with pytest.raises(E2ARateLimitError) as ei:
+            await c.account.request_sending_access(
+                use_case="x", recipients="y", expected_daily_volume=1,
+            )
+    assert ei.value.code == "rate_limited"
+    assert ei.value.retryable is True
+    assert ei.value.retry_after_seconds == 60
+
+
+@pytest.mark.anyio
+async def test_account_delete_permanent_deferred_receipt(httpx_mock):
+    httpx_mock.add_response(
+        json={
+            "deleted": True,
+            "mode": "trash",
+            "erase_deferred": True,
+            "purge_after": "2026-10-26T00:00:00Z",
+            "message": "kept in the trash",
+            "messages_deleted": 0,
+            "usage_events_deleted": 0,
+            "usage_summaries_deleted": 0,
+            "agents_deleted": 1,
+            "domains_deleted": 0,
+            "api_keys_deleted": 1,
+            "sessions_deleted": 0,
+            "agent_suppressions_deleted": 0,
+            "agent_unsubscribe_tokens_deleted": 0,
+            "user_deleted": False,
+        }
+    )
+    async with _client() as c:
+        res = await c.account.delete(permanent=True)
+    assert res.mode == "trash"
+    assert res.erase_deferred is True
+    assert res.purge_after is not None
+    assert res.user_deleted is False
+
+
+@pytest.mark.anyio
+async def test_agent_delete_trashes_by_default_and_omits_permanent(httpx_mock):
+    httpx_mock.add_response(json={"deleted": True, "email": "bot@agents.localhost", "messages_deleted": 0})
+    async with _client() as c:
+        res = await c.agents.delete("bot@agents.localhost")
+    req = httpx_mock.get_requests()[-1]
+    assert req.method == "DELETE"
+    assert "confirm=DELETE" in str(req.url)
+    assert "permanent" not in req.url.params
+    assert res.erase_deferred is None
+
+
+@pytest.mark.anyio
+async def test_agent_delete_permanent_reports_a_deferral(httpx_mock):
+    httpx_mock.add_response(
+        json={
+            "deleted": True,
+            "email": "bot@agents.localhost",
+            "messages_deleted": 0,
+            "erase_deferred": True,
+            "purge_after": "2026-10-26T00:00:00Z",
+            "message": "moved to the trash",
+        }
+    )
+    async with _client() as c:
+        res = await c.agents.delete("bot@agents.localhost", permanent=True)
+    req = httpx_mock.get_requests()[-1]
+    assert req.url.params["permanent"] == "true"
+    assert res.erase_deferred is True
+    assert res.purge_after is not None
+
+
+@pytest.mark.anyio
+async def test_message_delete_permanent_reports_a_deferral(httpx_mock):
+    httpx_mock.add_response(
+        json={
+            "deleted": True,
+            "id": "msg_sent",
+            "erase_deferred": True,
+            "purge_after": "2026-10-26T00:00:00Z",
+            "message": "stays in the trash",
+        }
+    )
+    async with _client() as c:
+        res = await c.messages.delete("bot@agents.localhost", "msg_sent", permanent=True)
+    assert res.erase_deferred is True
+    assert res.purge_after is not None
+
+
+@pytest.mark.anyio
+async def test_account_daily_limit_decodes_utc_reset(httpx_mock):
+    from e2a.v1.generated.models.account_view import AccountView
+    httpx_mock.add_response(json=_valid(AccountView, daily_limit={
+        "limit": 88, "used": 17, "shared_limit": 50, "shared_used": 6,
+        "clean_active_days": 1, "resets_at": "2026-01-02T00:00:00Z",
+    }))
+    async with _client() as c:
+        account = await c.account.get()
+    assert account.daily_limit.limit == 88
+    assert account.daily_limit.shared_used == 6
+    assert account.daily_limit.resets_at.isoformat() == "2026-01-02T00:00:00+00:00"

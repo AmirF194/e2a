@@ -253,20 +253,31 @@ func scanProtectionEventsForUser(ctx context.Context, tx pgx.Tx, userID string) 
 // {deleted:true, ...}); the /v1 handler sets it. It is always true on a
 // response — a failed delete is an error envelope, never deleted:false.
 type DeleteUserDataResult struct {
-	Deleted                       bool  `json:"deleted" doc:"Always true — the account no longer exists. A failed delete is an error envelope, never deleted:false."`
-	UsageEventsDeleted            int64 `json:"usage_events_deleted"`
-	UsageSummariesDeleted         int64 `json:"usage_summaries_deleted"`
-	MessagesDeleted               int64 `json:"messages_deleted"`
-	AgentsDeleted                 int64 `json:"agents_deleted"`
-	DomainsDeleted                int64 `json:"domains_deleted"`
-	APIKeysDeleted                int64 `json:"api_keys_deleted"`
-	SessionsDeleted               int64 `json:"sessions_deleted"`
-	AgentSuppressionsDeleted      int64 `json:"agent_suppressions_deleted"`
-	AgentUnsubscribeTokensDeleted int64 `json:"agent_unsubscribe_tokens_deleted"`
-	OAuthAuthCodesDeleted         int64 `json:"oauth_auth_codes_deleted,omitempty"`
-	OAuthAccessTokensDeleted      int64 `json:"oauth_access_tokens_deleted,omitempty"`
-	OAuthRefreshTokensDeleted     int64 `json:"oauth_refresh_tokens_deleted,omitempty"`
-	UserDeleted                   bool  `json:"user_deleted"`
+	Deleted bool `json:"deleted" doc:"Always true — the account is no longer usable. A failed delete is an error envelope, never deleted:false."`
+	// Mode is additive: "trash" (the default — the account is restorable by
+	// signing in until purge_after) or "permanent" (?permanent=true, or a
+	// deployment with account trash disabled — the content is erased now).
+	Mode string `json:"mode,omitempty" doc:"How the account was deleted. trash: the account is inert and restorable by signing in to the dashboard until purge_after, after which it is purged; messages_deleted is 0 and the other counts describe rows trashed, revoked or unverified. permanent: the content was erased now (?permanent=true, or a deployment with account trash disabled) and the counts are the rows removed. Open set: tolerate unknown values."`
+	// PurgeAfter is when a trashed account will be purged (trash mode only).
+	PurgeAfter                    *time.Time `json:"purge_after,omitempty" doc:"When the trashed account becomes eligible for permanent purge. Present only when mode is trash."`
+	UsageEventsDeleted            int64      `json:"usage_events_deleted"`
+	UsageSummariesDeleted         int64      `json:"usage_summaries_deleted"`
+	MessagesDeleted               int64      `json:"messages_deleted"`
+	AgentsDeleted                 int64      `json:"agents_deleted"`
+	DomainsDeleted                int64      `json:"domains_deleted"`
+	APIKeysDeleted                int64      `json:"api_keys_deleted"`
+	SessionsDeleted               int64      `json:"sessions_deleted"`
+	AgentSuppressionsDeleted      int64      `json:"agent_suppressions_deleted"`
+	AgentUnsubscribeTokensDeleted int64      `json:"agent_unsubscribe_tokens_deleted"`
+	OAuthAuthCodesDeleted         int64      `json:"oauth_auth_codes_deleted,omitempty"`
+	OAuthAccessTokensDeleted      int64      `json:"oauth_access_tokens_deleted,omitempty"`
+	OAuthRefreshTokensDeleted     int64      `json:"oauth_refresh_tokens_deleted,omitempty"`
+	UserDeleted                   bool       `json:"user_deleted" doc:"True only when the account row itself was erased (mode permanent)."`
+	// EraseDeferred marks a permanent erase that was deferred to the trash
+	// because the account recently emailed external recipients
+	// (identity.RecentSenderEraseDefer); Message explains it.
+	EraseDeferred bool   `json:"erase_deferred,omitempty" doc:"True when permanent=true was requested but the account emailed external recipients recently (within a deployment-configured window, 14 days by default), so it was moved to the trash instead of being erased now: mode is trash and the account is purged at purge_after. The account is already unusable; the owner can restore it by signing in before purge_after. Absent otherwise."`
+	Message       string `json:"message,omitempty" doc:"Human-readable explanation, present when erase_deferred is true. Do not parse it; branch on erase_deferred."`
 } // @name DeleteUserDataResult
 
 // DeleteUserData wipes everything tied to a user in a single transaction.
@@ -292,6 +303,13 @@ func (s *Store) DeleteUserData(ctx context.Context, userID string) (*DeleteUserD
 // delete. A nil hook is a plain account delete (dev / no SES). The DB FK
 // cascade still removes the domain rows; the hook only schedules the remote
 // SES cleanup that the cascade cannot do.
+//
+// TEST-ONLY: production account deletion goes DeleteUserDataCore →
+// EraseAccount / TrashAccount, whose purge seal also stamps the retained
+// feedback-provenance horizon; this path does not. Nothing outside tests
+// calls DeleteUserData or DeleteUserDataTx.
+// TODO(tokencanopy/e2a#1013): remove both, porting their tests to
+// EraseAccount.
 func (s *Store) DeleteUserDataTx(ctx context.Context, userID string, perDomainInTx func(ctx context.Context, tx pgx.Tx, domain string) error) (*DeleteUserDataResult, error) {
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
@@ -650,4 +668,43 @@ func scanUsageEventsForUser(ctx context.Context, tx pgx.Tx, userID string) ([]Us
 		out = append(out, e)
 	}
 	return out, rows.Err()
+}
+
+// DefaultFeedbackRetention is the post-account-deletion horizon for retained
+// feedback provenance, matching the sending-protection policy default
+// (sending_feedback_post_account_retention_days = 30).
+const DefaultFeedbackRetention = 30 * 24 * time.Hour
+
+// SetFeedbackRetention pins a fixed post-deletion feedback horizon. Tests
+// use it; production installs SetFeedbackRetentionResolver instead.
+func (s *Store) SetFeedbackRetention(d time.Duration) {
+	if d > 0 {
+		s.feedbackRetention = func(context.Context) (time.Duration, error) { return d, nil }
+	}
+}
+
+// SetFeedbackRetentionResolver installs the accessor the purge seal reads
+// the post-deletion horizon from, AT PURGE TIME: the sending-policy
+// module's effective policy, so a database-source deployment whose
+// activated policy differs from the config file stamps the horizon the
+// janitor and non-customer correlations use.
+func (s *Store) SetFeedbackRetentionResolver(fn func(context.Context) (time.Duration, error)) {
+	s.feedbackRetention = fn
+}
+
+// resolveFeedbackRetention returns the horizon the seal stamps. A resolver
+// error fails the seal; the purge resumes on its next pass rather than
+// stamping a horizon nobody configured.
+func (s *Store) resolveFeedbackRetention(ctx context.Context) (time.Duration, error) {
+	if s.feedbackRetention == nil {
+		return DefaultFeedbackRetention, nil
+	}
+	d, err := s.feedbackRetention(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("resolve feedback retention: %w", err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("resolve feedback retention: non-positive horizon %s", d)
+	}
+	return d, nil
 }
